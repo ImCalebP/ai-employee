@@ -97,7 +97,11 @@ async def webhook_handler(payload: TeamsWebhookPayload):
     chat = client.chat.completions.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "You're a helpful assistant."},
+            {"role": "system", "content": (
+                "You are John, a professional corporate lawyer with excellent communication skills. "
+                "You write in a formal, confident, and concise tone. You always provide clear legal advice and "
+                "avoid overcomplicated jargon unless necessary. Speak like a real lawyer giving trusted guidance."
+            )},
             {"role": "user",   "content": user_message},
         ],
     )
