@@ -1,4 +1,3 @@
-# services/intent_api/intent.py
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
@@ -9,32 +8,36 @@ from datetime import datetime
 # ───── OpenAI ────────────────────────────────────────────────────────────
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ───── MSAL utilities ────────────────────────────────────────────────────
+# ───── MSAL helpers (delegated auth) ─────────────────────────────────────
 from common.graph_auth import (
     get_msal_app,
     exchange_code_for_tokens,
     get_access_token,
 )
 
-# ───── Supabase client for chat memory ───────────────────────────────────
-from common.supabase import supabase
+# ───── Supabase memory helpers ───────────────────────────────────────────
+from common.memory_helpers import (
+    save_message,
+    fetch_chat_history,
+    fetch_global_history,
+)
 
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
 
-app = FastAPI(title="AI-Employee with Supabase memory")
+app = FastAPI(title="AI-Employee with per-chat + global memory")
 logging.basicConfig(level=logging.INFO)
 
 
-# ───────────────────────── auth helpers (one-time) ───────────────────────
+# ───────────────────────── auth endpoints (one-time) ─────────────────────
 @app.get("/auth/login")
 def auth_login():
-    auth_url = get_msal_app().get_authorization_request_url(
+    url = get_msal_app().get_authorization_request_url(
         scopes=["Chat.ReadWrite"],
         redirect_uri=REDIRECT_URI,
         state="ai-login",
         prompt="login",
     )
-    return RedirectResponse(auth_url)
+    return RedirectResponse(url)
 
 
 @app.get("/auth/callback")
@@ -49,7 +52,7 @@ def auth_callback(code: str | None = None, error: str | None = None):
     return HTMLResponse("<h2>✅ Login successful — you can close this tab.</h2>")
 
 
-# ────────────────────────── Teams & memory helpers ───────────────────────
+# ───────────────────────── Teams POST helper ─────────────────────────────
 def send_teams_reply(chat_id: str, message: str, token: str):
     url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
     resp = requests.post(
@@ -61,35 +64,20 @@ def send_teams_reply(chat_id: str, message: str, token: str):
     return resp.status_code, resp.text
 
 
-def save_message(chat_id: str, sender: str, content: str):
-    supabase.table("message_history").insert(
-        {"chat_id": chat_id, "sender": sender, "content": content}
-    ).execute()
-
-
-def fetch_recent_history(chat_id: str, limit: int = 10):
-    rows = (
-        supabase.table("message_history")
-        .select("sender,content")
-        .eq("chat_id", chat_id)
-        .order("timestamp", desc=False)
-        .limit(limit)
-        .execute()
-    )
-    return rows.data or []
-
-
-# ───────────────────────── webhook schema & route ────────────────────────
+# ───────────────────── Power-Automate webhook payload ────────────────────
 class TeamsWebhookPayload(BaseModel):
     messageId: str
     conversationId: str
 
 
+# ─────────────────────────── main webhook ────────────────────────────────
 @app.post("/webhook")
 async def webhook_handler(payload: TeamsWebhookPayload):
-    logging.info("[Webhook] %s / %s", payload.conversationId, payload.messageId)
+    chat_id = payload.conversationId
+    msg_id = payload.messageId
+    logging.info("[Webhook] chat=%s  msg=%s", chat_id, msg_id)
 
-    # access-token
+    # 1. Get Graph access-token (refresh if needed)
     try:
         access_token, _ = get_access_token()
     except RuntimeError:
@@ -98,20 +86,13 @@ async def webhook_handler(payload: TeamsWebhookPayload):
             "No refresh token stored. Visit /auth/login once and sign in.",
         )
 
-    # fetch full Teams message
-    msg_url = (
-        f"https://graph.microsoft.com/v1.0/chats/"
-        f"{payload.conversationId}/messages/{payload.messageId}"
-    )
+    # 2. Pull full Teams message
+    msg_url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{msg_id}"
     r = requests.get(msg_url, headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
     r.raise_for_status()
     msg_data = r.json()
 
-    # robust sender extraction
-    sender_name = (
-        msg_data.get("from") or {}
-    ).get("user", {}).get("displayName", "") or "Unknown"
-
+    sender_name = (msg_data.get("from") or {}).get("user", {}).get("displayName", "") or "Unknown"
     if sender_name == "BARA Software":
         return {"status": "skipped", "reason": "self message"}
 
@@ -119,13 +100,14 @@ async def webhook_handler(payload: TeamsWebhookPayload):
     if not user_message:
         return {"status": "skipped", "reason": "empty message"}
 
-    # save user message
-    save_message(payload.conversationId, "user", user_message)
+    # 3. Save user message
+    save_message(chat_id, "user", user_message)
 
-    # pull recent memory
-    history = fetch_recent_history(payload.conversationId)
+    # 4. Fetch memory
+    chat_history   = fetch_chat_history(chat_id,  limit=10)  # per-thread
+    global_history = fetch_global_history(limit=5)           # cross-thread
 
-    # build context
+    # 5. Build GPT context
     messages = [
         {
             "role": "system",
@@ -135,24 +117,42 @@ async def webhook_handler(payload: TeamsWebhookPayload):
             ),
         }
     ]
-    for row in history:
+
+    # thread-specific
+    for row in chat_history:
         role = "user" if row["sender"] == "user" else "assistant"
         messages.append({"role": role, "content": row["content"]})
+
+    # global awareness slice
+    if global_history:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Below are a few snippets from other recent conversations "
+                    "for additional company context."
+                ),
+            }
+        )
+        for row in global_history:
+            role = "user" if row["sender"] == "user" else "assistant"
+            messages.append({"role": role, "content": row["content"]})
+
+    # newest user input last
     messages.append({"role": "user", "content": user_message})
 
-    # GPT-4
+    # 6. GPT-4
     chat = client.chat.completions.create(model="gpt-4", messages=messages)
     reply = chat.choices[0].message.content.strip()
 
-    # save assistant reply
-    save_message(payload.conversationId, "assistant", reply)
+    # 7. Save assistant reply
+    save_message(chat_id, "assistant", reply)
 
-    # send to Teams
-    status, ms_result = send_teams_reply(payload.conversationId, reply, access_token)
+    # 8. Send back to Teams
+    status, ms_result = send_teams_reply(chat_id, reply, access_token)
 
     return {
         "status": "sent" if status == 201 else "error",
-        "http_status": status,
         "ai_reply": reply,
         "graph_response": ms_result,
         "timestamp": datetime.utcnow().isoformat(),
