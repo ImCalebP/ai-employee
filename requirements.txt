@@ -3,3 +3,4 @@ uvicorn[standard]
 openai
 httpx
 pydantic-settings     # <-- gives us BaseSettings for Pydantic 2
+requests 
