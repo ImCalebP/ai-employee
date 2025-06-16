@@ -16,30 +16,30 @@ from openai import OpenAI
 from common.supabase import supabase
 
 # ─── OpenAI embedding setup ─────────────────────────────────────────────
-_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-_EMBED_MODEL = "text-embedding-3-small"          # 1 k tokens · 1536 dims
+_client       = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_EMBED_MODEL  = "text-embedding-3-small"          # 1 k tokens · 1536 dims
 
 
 # ─── pgvector helper ────────────────────────────────────────────────────
 def _vector_literal(vec: list[float]) -> str:
     """
-    Return a pgvector literal **for pgvector 0.5+**:
-        '[1,2,3,…]'  (square brackets, comma-separated)
-    We round to 7 dp – plenty for cosine similarity and keeps payload small.
+    Format a python list of floats as a pgvector literal **for pgvector ≥ 0.5**:
+        '[0.1234567,-0.0012345,…]'
+    We round to 7 dp – plenty for cosine similarity and keeps the row smaller.
     """
     return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
 
 
 # ─── OpenAI embedding wrapper ───────────────────────────────────────────
 def _embed(text: str) -> list[float]:
-    """Truncate to 4 k chars (embedding endpoint limit safeguard)."""
+    """Truncate to 4 k chars (embed endpoint limit safeguard)."""
     resp = _client.embeddings.create(model=_EMBED_MODEL, input=text[:4000])
     return resp.data[0].embedding
 
 
 # ─── public helpers ─────────────────────────────────────────────────────
 def save_message(chat_id: str, sender: str, content: str) -> None:
-    """Insert one row with its vector.  Logs any non-2xx response."""
+    """Insert one row together with its embedding.  Log any failure."""
     row = {
         "chat_id":   chat_id,
         "sender":    sender,                       # "user" | "assistant"
@@ -48,14 +48,18 @@ def save_message(chat_id: str, sender: str, content: str) -> None:
         "embedding": _vector_literal(_embed(content)),
     }
 
-    resp = supabase.table("message_history").insert(row).execute()
-    if getattr(resp, "status_code", 500) >= 300:
-        _log.error("Supabase insert failed (%s) – payload=%s",
-                   resp.status_code, row)
+    try:
+        resp = supabase.table("message_history").insert(row).execute()
+        # `resp` is a PostgrestResponse; on success it has `.data`, on error `.error`
+        if getattr(resp, "error", None):
+            _log.error("Supabase insert failed %s – payload=%s",
+                       resp.error, row)
+    except Exception as exc:                       # network or client error
+        _log.exception("Supabase insert raised – %s – payload=%s", exc, row)
 
 
 def fetch_chat_history(chat_id: str, limit: int = 10) -> list[dict]:
-    """Last *limit* rows for this chat (oldest→newest)."""
+    """Last *limit* rows for this chat (oldest → newest)."""
     resp = (
         supabase.table("message_history")
         .select("sender,content")
