@@ -18,16 +18,15 @@ from common.graph_auth import (
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
 
 app = FastAPI(title="AI-Employee intent API (delegated auth)")
+logging.basicConfig(level=logging.INFO)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # AUTH – call /auth/login once; /auth/callback stores refresh-token
 # ─────────────────────────────────────────────────────────────────────────
 @app.get("/auth/login")
 def auth_login():
-    """Redirect the browser to Microsoft login once (manual step)."""
     msal_app = get_msal_app()
-
-    # ⚠️  Do NOT include openid/profile/offline_access – MSAL adds them
     auth_url = msal_app.get_authorization_request_url(
         scopes=["Chat.ReadWrite"],
         redirect_uri=REDIRECT_URI,
@@ -62,25 +61,13 @@ def send_teams_reply(chat_id: str, message: str, token: str):
 class TeamsWebhookPayload(BaseModel):
     messageId: str
     conversationId: str
-    message: str
 
 
 # ───── Main endpoint Power Automate calls ────────────────────────────────
 @app.post("/webhook")
 async def webhook_handler(payload: TeamsWebhookPayload):
-    logging.info("Webhook received: %s", payload)
+    logging.info(f"[Webhook] Received for msg {payload.messageId} in chat {payload.conversationId}")
 
-    # 1. Generate GPT-4 answer
-    chat = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You're a helpful assistant."},
-            {"role": "user",   "content": payload.message},
-        ],
-    )
-    reply = chat.choices[0].message.content.strip()
-
-    # 2. Get delegated access token (auto-refresh with stored refresh-token)
     try:
         access_token, _ = get_access_token()
     except RuntimeError:
@@ -90,7 +77,33 @@ async def webhook_handler(payload: TeamsWebhookPayload):
             "sign in as info@barasoftware.com, then retry."
         )
 
-    # 3. Post reply back to the same conversation
+    # 1. Fetch full message from Graph API
+    msg_url = f"https://graph.microsoft.com/v1.0/chats/{payload.conversationId}/messages/{payload.messageId}"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    r = requests.get(msg_url, headers=headers, timeout=10)
+    r.raise_for_status()
+    msg_data = r.json()
+
+    # 2. Check sender name
+    sender_name = msg_data.get("from", {}).get("user", {}).get("displayName", "")
+    if sender_name == "BARA Software":
+        logging.info("Skipping message from self: BARA Software")
+        return {"status": "skipped", "reason": "Message sent by self."}
+
+    user_message = msg_data["body"]["content"]
+    logging.info(f"[Teams] {sender_name} wrote: {user_message.strip()}")
+
+    # 3. Generate GPT-4 answer
+    chat = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": "You're a helpful assistant."},
+            {"role": "user",   "content": user_message},
+        ],
+    )
+    reply = chat.choices[0].message.content.strip()
+
+    # 4. Post reply to chat
     status, ms_result = send_teams_reply(payload.conversationId, reply, access_token)
 
     return {
