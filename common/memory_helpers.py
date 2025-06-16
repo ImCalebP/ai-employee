@@ -1,18 +1,42 @@
 from common.supabase import supabase
+from openai import OpenAI
+import os, logging
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+EMBED_MODEL = "text-embedding-3-small"   # cheap + 1536-dim
+EMBED_DIM   = 1536
+
+# ───────────────────────── embeddings ───────────────────────────────────
+def embed(text: str) -> list[float]:
+    text = text.strip()[:4000] or " "     # empty → OpenAI error
+    out  = client.embeddings.create(model=EMBED_MODEL, input=text)
+    return out.data[0].embedding
+
+# ───────────────────────── DB helpers ───────────────────────────────────
 def save_message(chat_id: str, sender: str, content: str) -> None:
-    """Insert one row into message_history."""
-    supabase.table("message_history").insert(
-        {"chat_id": chat_id, "sender": sender, "content": content}
-    ).execute()
+    """
+    Insert one row with fresh embedding.
+    `sender` must be "user" or "assistant".
+    """
+    vector = embed(content)
+    res = (
+        supabase.table("message_history")
+        .insert(
+            {
+                "chat_id": chat_id,
+                "sender":  sender,
+                "content": content,
+                "embedding": vector,
+            }
+        )
+        .execute()
+    )
+    if res.error:
+        logging.error("Supabase insert error: %s", res.error)
 
 
 def fetch_chat_history(chat_id: str, limit: int = 10):
-    """
-    Return last `limit` messages for THIS chat (oldest → newest).
-    Shape: [{sender, content}, …]
-    """
     rows = (
         supabase.table("message_history")
         .select("sender,content")
@@ -25,10 +49,6 @@ def fetch_chat_history(chat_id: str, limit: int = 10):
 
 
 def fetch_global_history(limit: int = 5):
-    """
-    Return last `limit` messages across ALL chats (oldest → newest).
-    Used for global/company-wide context.
-    """
     rows = (
         supabase.table("message_history")
         .select("sender,content")
@@ -37,5 +57,14 @@ def fetch_global_history(limit: int = 5):
         .execute()
     )
     data = rows.data or []
-    data.reverse()  # newest→oldest ➜ oldest→newest
+    data.reverse()
     return data
+
+
+def semantic_search(query: str, k: int = 5):
+    vec = embed(query)
+    rows = (
+        supabase.rpc("match_messages", {"query_embedding": vec, "match_count": k})
+        .execute()
+    )
+    return rows.data or []
