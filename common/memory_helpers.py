@@ -1,34 +1,43 @@
 # common/memory_helpers.py
 from common.supabase import supabase
 from openai import OpenAI
-import os, logging
+import os, logging, typing as t
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 EMBED_MODEL = "text-embedding-3-small"
-EMBED_DIM   = 1536
+
+def _embed(txt: str) -> list[float]:
+    return client.embeddings.create(
+        model=EMBED_MODEL,
+        input=(txt or " ")[:4000],
+    ).data[0].embedding
 
 
-def embed(txt: str) -> list[float]:
-    txt = txt.strip()[:4000] or " "
-    return client.embeddings.create(model=EMBED_MODEL, input=txt).data[0].embedding
-
-
-# ────────────────────────────────────────────────────────────────────────
-def _ok(resp) -> bool:                      # helper for v2 client
-    return getattr(resp, "status_code", 500) < 300
-
-
-def save_message(chat_id: str, sender: str, content: str) -> None:
+# ---------------------------------------------------------------------- #
+def _http_code(resp: t.Any) -> int:
     """
-    Insert a row + embedding.  `sender` = "user" | "assistant".
+    Try to pull an HTTP-like status from *any* Supabase response object.
+    Works for PostgrestResponse (.status_code)   – insert/select
+            APIResponse        (.status)        – rpc()
     """
-    vec = embed(content)
+    return (
+        getattr(resp, "status_code", None)       # PostgrestResponse
+        or getattr(resp, "status", None)         # APIResponse
+        or 500
+    )
+
+
+def save_message(chat: str, sender: str, content: str) -> None:
+    """
+    Inserts one row with embedding. Never raises – only logs on failure.
+    """
+    vec = _embed(content)
 
     resp = (
         supabase.table("message_history")
         .insert(
             {
-                "chat_id":   chat_id,
+                "chat_id":   chat,
                 "sender":    sender,
                 "content":   content,
                 "embedding": vec,
@@ -37,15 +46,15 @@ def save_message(chat_id: str, sender: str, content: str) -> None:
         .execute()
     )
 
-    if not _ok(resp):
-        logging.error("Supabase insert failed %s – payload=%s", resp.status_code, resp.data)
+    if _http_code(resp) >= 300:
+        logging.error("Supabase insert failed (%s) – %s", _http_code(resp), resp.data)
 
 
-def fetch_chat_history(chat_id: str, limit: int = 10):
+def fetch_chat_history(chat: str, limit: int = 10):
     resp = (
         supabase.table("message_history")
         .select("sender,content")
-        .eq("chat_id", chat_id)
+        .eq("chat_id", chat)
         .order("timestamp", desc=False)
         .limit(limit)
         .execute()
@@ -61,13 +70,15 @@ def fetch_global_history(limit: int = 5):
         .limit(limit)
         .execute()
     )
-    data = resp.data or []
-    data.reverse()
-    return data
+    out = resp.data or []
+    out.reverse()          # old→new order
+    return out
 
 
 def semantic_search(query: str, k: int = 5):
-    vec  = embed(query)
-    resp = supabase.rpc("match_messages",
-                        {"query_embedding": vec, "match_count": k}).execute()
+    vec = _embed(query)
+    resp = supabase.rpc(
+        "match_messages",
+        {"query_embedding": vec, "match_count": k},
+    ).execute()
     return resp.data or []
