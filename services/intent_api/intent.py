@@ -1,18 +1,19 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
-import openai
+from openai import OpenAI
 import requests
 import os
 
 app = FastAPI()
 
-# Load secrets from Render environment variables
+# Load secrets from environment variables (Render)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MS_CLIENT_ID = os.getenv("MS_CLIENT_ID")
 MS_CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 MS_TENANT_ID = os.getenv("MS_TENANT_ID")
 
-openai.api_key = OPENAI_API_KEY
+# OpenAI client using modern SDK
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ───────────────────────────────────────────────────────── #
 #                      Graph Token Helper                   #
@@ -62,17 +63,17 @@ class TeamsWebhookPayload(BaseModel):
 async def webhook_handler(payload: TeamsWebhookPayload):
     print(f"[Webhook] New message from Teams:\n> {payload.message}")
 
-    # 1. Generate AI reply
-    completion = openai.ChatCompletion.create(
+    # 1. Generate GPT reply
+    chat = client.chat.completions.create(
         model="gpt-4",
         messages=[
             {"role": "system", "content": "You're a helpful assistant."},
             {"role": "user", "content": payload.message}
         ]
     )
-    reply = completion.choices[0].message.content.strip()
+    reply = chat.choices[0].message.content.strip()
 
-    # 2. Send reply back to Teams chat
+    # 2. Send reply to Teams
     token = get_graph_token()
     status, result = send_teams_reply(payload.conversationId, reply, token)
 

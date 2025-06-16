@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
-openai
 httpx
-pydantic-settings     # <-- gives us BaseSettings for Pydantic 2
-requests 
+requests
+pydantic-settings
+openai>=1.0.0
