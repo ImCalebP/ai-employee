@@ -59,12 +59,11 @@ def save_message(chat_id: str, sender: str, content: str) -> None:
 
 
 def fetch_chat_history(chat_id: str, limit: int = 10) -> list[dict]:
-    """Last *limit* rows for this chat (oldest → newest)."""
     resp = (
         supabase.table("message_history")
         .select("sender,content")
         .eq("chat_id", chat_id)
-        .order("timestamp", asc=True)
+        .order("timestamp")          # ↑ ascending is default, so just drop asc=
         .limit(limit)
         .execute()
     )
@@ -72,15 +71,15 @@ def fetch_chat_history(chat_id: str, limit: int = 10) -> list[dict]:
 
 
 def fetch_global_history(limit: int = 5) -> list[dict]:
-    """Tiny global slice to give GPT wider context."""
     resp = (
         supabase.table("message_history")
         .select("sender,content")
-        .order("timestamp", desc=True)
+        .order("timestamp", desc=True)   # ← want newest first
         .limit(limit)
         .execute()
     )
     return list(reversed(resp.data or []))
+
 
 
 def semantic_search(query: str, k: int = 5) -> list[dict]:
