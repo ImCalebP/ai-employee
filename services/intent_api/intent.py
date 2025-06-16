@@ -1,17 +1,18 @@
+# services/intent_api/intent.py
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
 from openai import OpenAI
-import os, requests
+import os, requests, logging
 
-# ─── OpenAI ──────────────────────────────────────────────────────────────
+# ───── OpenAI ────────────────────────────────────────────────────────────
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ─── Graph delegated-auth helpers (see common/graph_auth.py) ─────────────
+# ───── MSAL helper utilities (delegated flow) ────────────────────────────
 from common.graph_auth import (
     get_msal_app,
     exchange_code_for_tokens,
-    get_access_token,
+    get_access_token,          # returns (access_token, expires_in)
 )
 
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
@@ -19,16 +20,16 @@ REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
 app = FastAPI(title="AI-Employee intent API (delegated auth)")
 
 # ─────────────────────────────────────────────────────────────────────────
-# AUTH ENDPOINTS – run once, then refresh-token keeps working
+# AUTH – call /auth/login once; /auth/callback stores refresh-token
 # ─────────────────────────────────────────────────────────────────────────
 @app.get("/auth/login")
 def auth_login():
+    """Redirect the browser to Microsoft login once (manual step)."""
     msal_app = get_msal_app()
+
+    # ⚠️  Do NOT include openid/profile/offline_access – MSAL adds them
     auth_url = msal_app.get_authorization_request_url(
-        scopes=[
-            "Chat.ReadWrite",          # delegated Graph scope
-            "openid", "profile", "offline_access"  # OpenID trio (required)
-        ],
+        scopes=["Chat.ReadWrite"],
         redirect_uri=REDIRECT_URI,
         state="ai-login",
         prompt="login",
@@ -43,59 +44,58 @@ def auth_callback(code: str | None = None, error: str | None = None):
     try:
         exchange_code_for_tokens(code, REDIRECT_URI)
     except Exception as e:
+        logging.exception("Token exchange failed")
         raise HTTPException(400, f"Token exchange failed: {e}")
     return HTMLResponse("<h2>✅ Login successful — you can close this tab.</h2>")
 
 
-# ─── Teams helper – send message in chat ─────────────────────────────────
-def send_teams_reply(chat_id: str, reply: str, token: str):
+# ───── Helper: send message to Teams chat ────────────────────────────────
+def send_teams_reply(chat_id: str, message: str, token: str):
     url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    payload = {"body": {"contentType": "text", "content": reply}}
-    r = requests.post(url, json=payload, headers=headers, timeout=10)
-    return r.status_code, r.text
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    body = {"body": {"contentType": "text", "content": message}}
+    resp = requests.post(url, json=body, headers=headers, timeout=10)
+    return resp.status_code, resp.text
 
 
-# ─── Webhook payload model (from Power Automate) ─────────────────────────
+# ───── Webhook payload coming from Power Automate ────────────────────────
 class TeamsWebhookPayload(BaseModel):
     messageId: str
     conversationId: str
     message: str
 
 
-# ─── /webhook – main entrypoint ──────────────────────────────────────────
+# ───── Main endpoint Power Automate calls ────────────────────────────────
 @app.post("/webhook")
 async def webhook_handler(payload: TeamsWebhookPayload):
-    print(f"[Webhook] New Teams message:\n> {payload.message}")
+    logging.info("Webhook received: %s", payload)
 
-    # 1️⃣  GPT-4 reply
+    # 1. Generate GPT-4 answer
     chat = client.chat.completions.create(
         model="gpt-4",
         messages=[
             {"role": "system", "content": "You're a helpful assistant."},
-            {"role": "user", "content": payload.message},
+            {"role": "user",   "content": payload.message},
         ],
     )
     reply = chat.choices[0].message.content.strip()
 
-    # 2️⃣  Send reply as info@barasoftware.com (delegated token)
+    # 2. Get delegated access token (auto-refresh with stored refresh-token)
     try:
         access_token, _ = get_access_token()
-    except RuntimeError as e:
+    except RuntimeError:
         raise HTTPException(
             401,
-            "Refresh token not found. Visit /auth/login in a browser, "
+            "No refresh token stored. Run /auth/login in a browser, "
             "sign in as info@barasoftware.com, then retry."
-        ) from e
+        )
 
-    status, result = send_teams_reply(payload.conversationId, reply, access_token)
+    # 3. Post reply back to the same conversation
+    status, ms_result = send_teams_reply(payload.conversationId, reply, access_token)
 
     return {
         "status": "sent" if status == 201 else "error",
         "http_status": status,
         "ai_reply": reply,
-        "graph_response": result,
+        "graph_response": ms_result,
     }
