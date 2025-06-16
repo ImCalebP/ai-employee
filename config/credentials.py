@@ -3,27 +3,31 @@ Loads ALL secrets from env-vars.
 Import once anywhere:  from config.credentials import settings
 """
 from functools import lru_cache
-from pydantic import BaseSettings, SecretStr
+from pydantic_settings import BaseSettings          # ✔️ Pydantic-2 helper
+from pydantic import SecretStr
 
 
 class _Settings(BaseSettings):
-    # OpenAI
+    # -------- OpenAI --------
     OPENAI_API_KEY: SecretStr
 
-    # Microsoft Graph (Teams)
+    # -------- Microsoft Graph / Teams --------
     MS_CLIENT_ID:      SecretStr
     MS_CLIENT_SECRET:  SecretStr
     MS_TENANT_ID:      str
 
+    # ---------- (optional) add more secrets later ----------
+
     class Config:
-        env_file = ".env"      # only used locally
+        env_file = ".env"        # used only for local dev
         case_sensitive = True
 
 
 @lru_cache
 def get_settings() -> _Settings:
+    """Singleton accessor for settings ↔ avoids re-parsing envs."""
     return _Settings()
 
 
-# handy shortcut so you can   from config.credentials import settings
+# Shortcut so you can:  from config.credentials import settings
 settings = get_settings()

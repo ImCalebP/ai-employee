@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 openai
 httpx
-pydantic==1.10.15   # ← pins the last 1.x version so BaseSettings works
+pydantic-settings     # <-- gives us BaseSettings for Pydantic 2
