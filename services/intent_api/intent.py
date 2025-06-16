@@ -35,12 +35,15 @@ from common.graph_auth import (
 )
 
 # 2️⃣  Memory helpers (Supabase + embeddings)
+# … truncated imports …
 from common.memory_helpers import (
     save_message,
     fetch_chat_history,
     fetch_global_history,
-    semantic_search,
+    semantic_search,          # ← still used for tier-2 recall
 )
+# … the rest of the file you already have …
+
 
 # ────────────────────────────────────────────────────────────────────────
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"

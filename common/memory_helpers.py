@@ -1,68 +1,75 @@
-# common/memory_helpers.py
-from common.supabase import supabase
+"""
+R/W helper layer over the `message_history` table
+─────────────────────────────────────────────────
+• Stores every turn with an OpenAI embedding
+• Tier-1 recall  = last-N by chat_id  (+ small global slice)
+• Tier-2 recall  = pgvector similarity search (match_messages SQL function)
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import logging as _log
+import os
+
 from openai import OpenAI
-import os, logging, typing as t
+from common.supabase import supabase  # → create_client(...) held here
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-EMBED_MODEL = "text-embedding-3-small"
+# ─── OpenAI embedding setup ─────────────────────────────────────────────
+_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_EMBED_MODEL = "text-embedding-3-small"   # 1 k tokens, fast + cheap (1536 dims)
 
-def _embed(txt: str) -> list[float]:
-    return client.embeddings.create(
-        model=EMBED_MODEL,
-        input=(txt or " ")[:4000],
-    ).data[0].embedding
-
-
-# ---------------------------------------------------------------------- #
-def _http_code(resp: t.Any) -> int:
+# ─── pgvector helper ────────────────────────────────────────────────────
+def _vector_literal(vec: list[float]) -> str:
     """
-    Try to pull an HTTP-like status from *any* Supabase response object.
-    Works for PostgrestResponse (.status_code)   – insert/select
-            APIResponse        (.status)        – rpc()
+    Convert a Python list → `(1,2,3, …)` literal understood by pgvector.
+    We keep 7 dp which is more than enough precision for cosine similarity.
     """
-    return (
-        getattr(resp, "status_code", None)       # PostgrestResponse
-        or getattr(resp, "status", None)         # APIResponse
-        or 500
-    )
+    return "(" + ",".join(f"{x:.7f}" for x in vec) + ")"
 
 
-def save_message(chat: str, sender: str, content: str) -> None:
+# ─── embedding API ──────────────────────────────────────────────────────
+def _embed(text: str) -> list[float]:
+    """1-shot call – clips the prompt at 4 K characters for safety."""
+    resp = _client.embeddings.create(model=_EMBED_MODEL, input=text[:4000])
+    return resp.data[0].embedding
+
+
+# ─── public helpers ─────────────────────────────────────────────────────
+def save_message(chat_id: str, sender: str, content: str) -> None:
     """
-    Inserts one row with embedding. Never raises – only logs on failure.
+    Insert a single row.  We **must** send pgvector as a string literal ­–
+    NOT raw JSON – otherwise PostgREST tries to coerce it and 500s.
     """
-    vec = _embed(content)
-
-    resp = (
-        supabase.table("message_history")
-        .insert(
-            {
-                "chat_id":   chat,
-                "sender":    sender,
-                "content":   content,
-                "embedding": vec,
-            }
-        )
-        .execute()
-    )
-
-    if _http_code(resp) >= 300:
-        logging.error("Supabase insert failed (%s) – %s", _http_code(resp), resp.data)
+    emb = _embed(content)
+    row = {
+        "chat_id":   chat_id,
+        "sender":    sender,            # "user" | "assistant"
+        "content":   content,
+        "timestamp": _dt.datetime.utcnow().isoformat(),
+        "embedding": _vector_literal(emb),
+    }
+    resp = supabase.table("message_history").insert(row).execute()
+    if getattr(resp, "status_code", 500) >= 300:
+        _log.error("Supabase insert failed (%s) – payload=%s",
+                   resp.status_code, row)
 
 
-def fetch_chat_history(chat: str, limit: int = 10):
+def fetch_chat_history(chat_id: str, limit: int = 10) -> list[dict]:
+    """Last N rows **for this chat**, oldest→newest (for replay into GPT)."""
     resp = (
         supabase.table("message_history")
         .select("sender,content")
-        .eq("chat_id", chat)
-        .order("timestamp", desc=False)
+        .eq("chat_id", chat_id)
+        .order("timestamp", asc=True)
         .limit(limit)
         .execute()
     )
     return resp.data or []
 
 
-def fetch_global_history(limit: int = 5):
+def fetch_global_history(limit: int = 5) -> list[dict]:
+    """A small global slice (helps with general ‘company memory’)."""
     resp = (
         supabase.table("message_history")
         .select("sender,content")
@@ -70,15 +77,20 @@ def fetch_global_history(limit: int = 5):
         .limit(limit)
         .execute()
     )
-    out = resp.data or []
-    out.reverse()          # old→new order
-    return out
+    # Flip to chronological order so GPT sees oldest first.
+    return list(reversed(resp.data or []))
 
 
-def semantic_search(query: str, k: int = 5):
-    vec = _embed(query)
-    resp = supabase.rpc(
-        "match_messages",
-        {"query_embedding": vec, "match_count": k},
-    ).execute()
+def semantic_search(query: str, k: int = 5) -> list[dict]:
+    """
+    Tier-2 recall – search ALL messages via pgvector.
+    Requires the `match_messages` function from the earlier SQL snippet.
+    """
+    q_emb = _embed(query)
+    resp = (
+        supabase.rpc(
+            "match_messages",
+            {"query_embedding": q_emb, "match_count": k},
+        ).execute()
+    )
     return resp.data or []
