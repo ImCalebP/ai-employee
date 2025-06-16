@@ -6,3 +6,5 @@ pydantic-settings
 openai>=1.0.0
 msal                # Microsoft auth library
 cryptography        # token-encryption helper
+supabase            # ← ADD THIS LINE
+python-dotenv 
