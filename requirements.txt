@@ -1,6 +1,5 @@
 fastapi
 uvicorn
 openai
-requests
-python-dotenv
-
+httpx
+pydantic==1.10.15   # ← pins the last 1.x version so BaseSettings works
