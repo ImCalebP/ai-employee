@@ -170,16 +170,31 @@ async def webhook_handler(payload: TeamsWebhookPayload):
     intent = parsed.get("intent", "reply")
     reply  = parsed.get("reply", "").strip()
 
-    # 1️⃣1️⃣  Handle intents (unchanged) ---------------------------------
+ # 9️⃣  Handle intents (idempotent + advanced) ------------------------
     sent_ok = False
     if intent == "send_email":
-        try:
-            process_email_request(parsed["emailDetails"])
+        last_action = fetch_last_action(chat_id)
+        if (
+            last_action
+            and last_action.get("intent") == "send_email"
+            and last_action.get("emailDetails") == parsed["emailDetails"]
+        ):
+            # Already sent—don't resend!
+            reply = "This email has already been sent."
             sent_ok = True
-            logging.info("✓ Outlook e-mail sent")
-        except Exception as exc:
-            logging.exception("E-mail send failed")
-            reply = f"⚠️ I couldn’t send the e-mail: {exc}"
+        else:
+            try:
+                process_email_request(parsed["emailDetails"])
+                sent_ok = True
+                # Save this action as last_action
+                save_last_action(chat_id, {
+                    "intent": intent,
+                    "emailDetails": parsed["emailDetails"],
+                })
+                logging.info("✓ Outlook e-mail sent")
+            except Exception as exc:
+                logging.exception("E-mail send failed")
+                reply = f"⚠️ I couldn’t send the e-mail: {exc}"
 
     # 1️⃣2️⃣  Persist assistant turn & push to Teams ---------------------
     save_message(chat_id, "assistant", reply, chat_type)
