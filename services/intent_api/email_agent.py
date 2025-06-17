@@ -10,6 +10,7 @@ Recipient rules
 • Otherwise send, and upsert/enrich the contact afterwards.
 """
 from __future__ import annotations
+import os  
 import json, logging, re, requests
 from typing import Dict, List, Tuple
 
@@ -22,7 +23,7 @@ from services.intent_api.reply_agent import process_reply
 from services.intent_api.contact_agent import (
     list_contacts, get_contact, upsert_contact
 )
-import os  
+
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.getLogger(__name__).setLevel(logging.INFO)
