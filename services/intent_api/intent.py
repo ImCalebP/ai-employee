@@ -1,20 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
 # services/intent_api/intent.py
 """
-FastAPI webhook that:
-• receives Power-Automate JSON payloads
-• fetches the full Teams message
-• stores user / assistant turns + embeddings in Supabase
-• uses tier-1 (chat + global) memory first
-• falls back to pgvector similarity search when GPT says it needs it
-• answers as “John”, a professional corporate lawyer
-"""
+FastAPI webhook that receives Power-Automate payloads, chats as **John**
+(a professional corporate lawyer), stores memory in Supabase, recalls extra
+context with pgvector **and** can send Outlook e-mails when the LLM tells it to.
 
+• One-time interactive login:  GET  /auth/login   (stores encrypted refresh-token)
+• Graph access-token refresh:  automatic via common.graph_auth
+"""
 from __future__ import annotations
 
 import json
 import logging
 import os
 from datetime import datetime
+from typing import Any
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -22,45 +22,38 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from openai import OpenAI
 from pydantic import BaseModel
 
-# ────────────────────────────────────────────────────────────────────────
-#  Initialise deps
-# ────────────────────────────────────────────────────────────────────────
+# ─────────────────────────  OpenAI / model  ──────────────────────────────
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 1️⃣  Azure-AD helpers (delegated auth)
+# ─────────────────────────  Graph auth helpers  ──────────────────────────
 from common.graph_auth import (
     get_msal_app,
     exchange_code_for_tokens,
     get_access_token,
 )
 
-# 2️⃣  Memory helpers (Supabase + embeddings)
-# … truncated imports …
+# ─────────────────────────  Memory helpers  ─────────────────────────────
 from common.memory_helpers import (
     save_message,
     fetch_chat_history,
     fetch_global_history,
-    semantic_search,          # ← still used for tier-2 recall
+    semantic_search,
 )
-# … the rest of the file you already have …
 
+# ─────────────────────────  E-mail helper  ───────────────────────────────
+from services.intent_api.email_agent import process_email_request  # new
 
-# ────────────────────────────────────────────────────────────────────────
+# ─────────────────────────  FastAPI basics  ─────────────────────────────
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
 
-app = FastAPI(title="AI-Employee  • tier-2 recall")
+app = FastAPI(title="AI-Employee • intent handler")
 logging.basicConfig(level=logging.INFO)
 
-# ───────────────────────────  Auth endpoints  ───────────────────────────
 
-
+# ─────────────────────────  Auth endpoints  ─────────────────────────────
 @app.get("/auth/login")
 def auth_login() -> RedirectResponse:
-    """
-    One-time manual login.
-    Visit /auth/login, sign in **once** as info@barasoftware.com,
-    refresh-token is stored → service can reply forever after.
-    """
+    """Run ONCE manually – stores an encrypted refresh-token."""
     url = get_msal_app().get_authorization_request_url(
         scopes=["Chat.ReadWrite"],  # MSAL auto-adds openid profile offline_access
         redirect_uri=REDIRECT_URI,
@@ -76,13 +69,13 @@ def auth_callback(code: str | None = None, error: str | None = None) -> HTMLResp
         raise HTTPException(400, f"Azure AD error: {error}")
     try:
         exchange_code_for_tokens(code, REDIRECT_URI)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logging.exception("Token exchange failed")
         raise HTTPException(400, f"Token exchange failed: {exc}") from exc
     return HTMLResponse("<h2>✅ Login successful — you can close this tab.</h2>")
 
 
-# ───────────────────────────  Teams helpers  ────────────────────────────
+# ─────────────────────────  Teams helpers  ──────────────────────────────
 def send_teams_reply(chat_id: str, message: str, token: str) -> tuple[int, str]:
     resp = requests.post(
         f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
@@ -101,19 +94,19 @@ def send_teams_reply(chat_id: str, message: str, token: str) -> tuple[int, str]:
     return resp.status_code, resp.text
 
 
-# ───────────────────────────  Webhook model  ────────────────────────────
+# ─────────────────────────  Webhook model  ──────────────────────────────
 class TeamsWebhookPayload(BaseModel):
     messageId: str
     conversationId: str
 
 
-# ───────────────────────────  Main webhook  ─────────────────────────────
+# ─────────────────────────  Main webhook  ───────────────────────────────
 @app.post("/webhook")
 async def webhook_handler(payload: TeamsWebhookPayload):
     chat_id, msg_id = payload.conversationId, payload.messageId
     logging.info("→ webhook chat=%s msg=%s", chat_id, msg_id)
 
-    # ---- 1. Graph token -------------------------------------------------
+    # ─── 1. Graph token ────────────────────────────────────────────────
     try:
         access_token, _ = get_access_token()
     except RuntimeError:
@@ -122,7 +115,7 @@ async def webhook_handler(payload: TeamsWebhookPayload):
             "Refresh-token missing. Run /auth/login once in a browser and sign in.",
         )
 
-    # ---- 2. Fetch the full Teams message -------------------------------
+    # ─── 2. Fetch the full Teams message ───────────────────────────────
     ms_resp = requests.get(
         f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{msg_id}",
         headers={"Authorization": f"Bearer {access_token}"},
@@ -134,97 +127,134 @@ async def webhook_handler(payload: TeamsWebhookPayload):
     sender = (msg.get("from") or {}).get("user", {}).get("displayName", "Unknown")
     text = (msg.get("body") or {}).get("content", "").strip()
 
-    # Skip our own bot or blank messages
+    # ignore our own bot / blank
     if sender == "BARA Software" or not text:
         return {"status": "skipped"}
 
-    # ---- 3. Persist the user message (embedding + row) ------------------
+    # ─── 3. Persist user turn  ──────────────────────────────────────────
     save_message(chat_id, "user", text)
 
-    # ---- 4. Tier-1 memory (chat + small global slice) -------------------
-    chat_mem = fetch_chat_history(chat_id, limit=10)
+    # ─── 4. Tier-1 memory  ──────────────────────────────────────────────
+    chat_mem   = fetch_chat_history(chat_id, limit=10)
     global_mem = fetch_global_history(limit=5)
 
-    messages: list[dict] = [
+    base_messages: list[dict[str, Any]] = [
         {
             "role": "system",
             "content": (
-                "You are **John**, a highly experienced corporate lawyer. "
-                "Respond formally, confidently and concisely, avoiding unnecessary jargon."
+                "You are **John**, a highly experienced corporate lawyer at a large "
+                "firm. Respond formally, confidently and concisely, avoiding "
+                "unnecessary jargon."
             ),
         }
     ]
 
-    # past chat
+    # recent chat history
     for row in chat_mem:
         role = "user" if row["sender"] == "user" else "assistant"
-        messages.append({"role": role, "content": row["content"]})
+        base_messages.append({"role": role, "content": row["content"]})
 
     # thin global slice
     if global_mem:
-        messages.append(
-            {
-                "role": "system",
-                "content": "Snippets from other recent conversations for context:",
-            }
+        base_messages.append(
+            {"role": "system", "content": "Context from other recent chats:"}
         )
         for row in global_mem:
             role = "user" if row["sender"] == "user" else "assistant"
-            messages.append({"role": role, "content": row["content"]})
+            base_messages.append({"role": role, "content": row["content"]})
 
-    messages.append({"role": "user", "content": text})
+    # user’s new message
+    base_messages.append({"role": "user", "content": text})
 
-    # ---- 5. First GPT pass – ask if it needs more memory ---------------
+    # ─── 5. Pass-1: ask if we need more memory  ─────────────────────────
     need_prompt = {
         "role": "system",
         "content": (
             "If you still need earlier context OUTSIDE what you see, "
-            'reply ONLY with JSON: {"need_memory": true, "reason": "..."} . '
-            'Otherwise reply ONLY with JSON: {"need_memory": false, "answer": "..."}'
+            'reply ONLY with JSON: {"need_memory": true, "reason": "..."} '
+            'Otherwise reply ONLY with JSON: {"need_memory": false}'
         ),
     }
 
     first = client.chat.completions.create(
         model="gpt-4o-mini",
         response_format={"type": "json_object"},
-        messages=messages + [need_prompt],
+        messages=base_messages + [need_prompt],
     ).choices[0].message
 
     need_memory = False
-    answer_txt = ""
-
     try:
-        parsed = json.loads(first.content)  # ← .content is the JSON string
-        need_memory = parsed.get("need_memory", False)
-        answer_txt = parsed.get("answer", "").strip()
-    except json.JSONDecodeError:
-        # Model decided to ignore the schema → treat as final answer
-        answer_txt = first.content.strip()
+        need_memory = json.loads(first.content).get("need_memory", False)
+    except Exception:  # noqa: BLE001
+        pass  # weird answer → assume no extra memory
 
-    # ---- 6. Tier-2 recall if requested ---------------------------------
+    # ─── 6. Tier-2 recall if requested ──────────────────────────────────
+    extra_memory: list[dict[str, str]] = []
     if need_memory:
         matches = semantic_search(text, k=5)
         if matches:
-            mem_msgs = [{"role": "system", "content": "Additional memories:"}]
+            extra_memory.append({"role": "system", "content": "Additional memories:"})
             for row in matches:
                 role = "user" if row["sender"] == "user" else "assistant"
-                mem_msgs.append({"role": role, "content": row["content"]})
+                extra_memory.append({"role": role, "content": row["content"]})
 
-            answer_txt = (
-                client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=messages + mem_msgs + [{"role": "user", "content": text}],
-                )
-                .choices[0]
-                .message.content.strip()
-            )
+    # ─── 7. Pass-2: final structured answer  ────────────────────────────
+    format_instruction = {
+        "role": "system",
+        "content": (
+            "When you answer, output **ONLY a single JSON object**.\n\n"
+            "If the user wants you to write & send an e-mail, use:\n"
+            '{\n'
+            '  "intent": "send_email",\n'
+            '  "reply":   "What you will tell the user back in Teams",\n'
+            '  "emailDetails": {\n'
+            '    "to":     ["a@example.com", "b@example.com"],\n'
+            '    "subject":"...",\n'
+            '    "body":   "..."  \n'
+            '  }\n'
+            '}\n\n'
+            "If you’re just replying normally, use:\n"
+            '{\n'
+            '  "intent": "reply",\n'
+            '  "reply":  "Your message here"\n'
+            '}\n\n'
+            "NEVER invent unknown e-mail addresses – ask the user instead."
+        ),
+    }
 
-    # ---- 7. Store assistant reply & push to Teams ----------------------
-    save_message(chat_id, "assistant", answer_txt)
-    status, _ = send_teams_reply(chat_id, answer_txt, access_token)
+    final_resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},
+        messages=base_messages + extra_memory + [format_instruction],
+    ).choices[0].message
+
+    # ─── 8. Parse & act  ────────────────────────────────────────────────
+    try:
+        parsed: dict[str, Any] = json.loads(final_resp.content)
+    except json.JSONDecodeError:
+        parsed = {"intent": "reply", "reply": final_resp.content.strip()}
+
+    intent  = parsed.get("intent", "reply")
+    reply   = parsed.get("reply", "").strip()
+    sent_ok = False
+
+    if intent == "send_email":
+        try:
+            process_email_request(parsed["emailDetails"])  # may raise
+            sent_ok = True
+            logging.info("✓ Outlook e-mail sent")
+        except Exception as exc:  # noqa: BLE001
+            # tell the user what went wrong
+            reply = f"⚠️ I couldn’t send the e-mail: {exc}"
+            logging.exception("Email sending failed")
+
+    # ─── 9. Persist assistant turn & send back to Teams  ────────────────
+    save_message(chat_id, "assistant", reply)
+    status, body = send_teams_reply(chat_id, reply, access_token)
 
     return {
-        "status": "sent" if status == 201 else "error",
-        "answer": answer_txt,
+        "status": "sent" if status == 201 else f"graph_error:{body}",
+        "intent": intent,
+        "email_sent": sent_ok,
         "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
     }
