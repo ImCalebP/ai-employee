@@ -1,13 +1,11 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # services/intent_api/email_agent.py
 """
-Compose and send an Outlook e-mail, given a Teams chat_id.
+Draft and send an Outlook e-mail based on chat context.
 
-Steps
-1. Pull full memory (chat + semantic + global)
-2. Ask GPT to output {"to":[…],"subject":"…","body":"…"}
-3. Send via Microsoft Graph
-4. Persist the assistant turn
+• If **any** critical field is missing, raise
+  ValueError("missing <field>")  – intent.py will catch this and
+  hand control to reply_agent so the user is prompted for details.
 """
 from __future__ import annotations
 import json, logging, os
@@ -27,17 +25,15 @@ from common.memory_helpers import (
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.getLogger(__name__).setLevel(logging.INFO)
 
-# ─────────────── Graph helpers ────────────────
-def _send_graph(
-    url: str, token: str, *, method: str = "GET", payload: Dict[str, Any] | None = None
-) -> Dict[str, Any]:
+# ───────── MS Graph helpers ─────────
+def _graph(url: str, token: str, *,
+           method: str = "GET",
+           payload: Dict[str, Any] | None = None) -> Dict[str, Any]:
     r = requests.request(
         method,
         url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"},
         json=payload,
         timeout=10,
     )
@@ -45,96 +41,92 @@ def _send_graph(
     return r.json() if r.text else {}
 
 
-def _send_outlook_mail(details: Dict[str, Any], token: str) -> None:
-    """
-    Graph v1.0 sendMail endpoint.
-    `details` must hold keys: to, subject, body (HTML or plain text)
-    """
-    url = "https://graph.microsoft.com/v1.0/me/sendMail"
+def _send_outlook(details: Dict[str, Any], token: str) -> None:
     payload = {
         "message": {
             "subject": details["subject"],
-            "body": {"contentType": "Text", "content": details["body"]},
-            "toRecipients": [{"emailAddress": {"address": addr}} for addr in details["to"]],
+            "body": {
+                "contentType": "Text",
+                "content": details["body"],
+            },
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in details["to"]
+            ],
         }
     }
-    _send_graph(url, token, method="POST", payload=payload)
+    _graph("https://graph.microsoft.com/v1.0/me/sendMail",
+           token, method="POST", payload=payload)
 
 
-# ─────────────── Public API ────────────────
+# ───────── Public entry-point ─────────
 def process_email_request(chat_id: str) -> None:
     """
-    Derive e-mail details from chat context, send it, and log the turn.
-    Called by intent.py when intent == "send_email".
+    Build e-mail from context and send it.
+    Raises ValueError("missing …") if info is incomplete.
     """
     access_token, _ = get_access_token()
 
-    # --- Memory ---------------------------------------------------------
-    chat_mem = fetch_chat_history(chat_id, limit=40)
-    user_turns = [row for row in chat_mem if row["sender"] == "user"]
-    last_user_text = user_turns[-1]["content"] if user_turns else ""
+    # — Memory -----------------------------------------------------------
+    chat_mem     = fetch_chat_history(chat_id, limit=40)
+    user_turns   = [r for r in chat_mem if r["sender"] == "user"]
+    last_user    = user_turns[-1]["content"] if user_turns else ""
+    global_mem   = fetch_global_history(limit=8)
+    semantic_mem = semantic_search(last_user, chat_id, k_chat=8, k_global=4)
 
-    global_mem = fetch_global_history(limit=8)
-    semantic_mem = semantic_search(last_user_text, chat_id, k_chat=8, k_global=4)
-
-    # --- GPT prompt -----------------------------------------------------
-    def _append(dst: List[Dict[str, str]], rows):
-        for r in rows:
-            dst.append(
-                {
-                    "role": "user" if r["sender"] == "user" else "assistant",
-                    "content": r["content"],
-                }
-            )
-
-    messages: List[Dict[str, str]] = [
-        {
+    def _build_prompt() -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = [{
             "role": "system",
             "content": (
-                "You draft Outlook e-mails. "
-                "Search ALL context to fill: recipients' e-mail(s), subject, body.\n\n"
+                "You draft Outlook e-mails. Search ALL context to find:\n"
+                "  • recipients' e-mails\n  • a concise subject\n  • the body text\n\n"
                 "Return ONE JSON only, exactly:\n"
                 '{"to":["a@b.com"],"subject":"...","body":"..."}\n'
-                "If any field is still missing after reading everything, "
-                'return {"error":"missing X"}'
+                "If ANY field is still missing after exhaustive search, "
+                'return {"error":"missing recipients"} (or subject / body).\n'
+                "NO extra keys, comments, or markdown."
             ),
-        }
-    ]
-    _append(messages, chat_mem)
-    if semantic_mem:
-        messages.append({"role": "system", "content": "🔎 Relevant context:"})
-        _append(messages, semantic_mem)
-    if global_mem:
-        messages.append({"role": "system", "content": "🌐 Other chats context:"})
-        _append(messages, global_mem)
-    messages.append(
-        {
+        }]
+        def _ap(dst, rows):
+            for r in rows:
+                dst.append({
+                    "role": "user" if r["sender"] == "user" else "assistant",
+                    "content": r["content"],
+                })
+        _ap(out, chat_mem)
+        if semantic_mem:
+            out.append({"role": "system", "content": "🔎 Relevant context:"})
+            _ap(out, semantic_mem)
+        if global_mem:
+            out.append({"role": "system", "content": "🌐 Other chats context:"})
+            _ap(out, global_mem)
+        out.append({
             "role": "system",
-            "content": "Output strictly one JSON object as specified—no comments.",
-        }
-    )
+            "content": "Output strictly one JSON as specified.",
+        })
+        return out
 
-    draft: Dict[str, Any] = json.loads(
+    draft = json.loads(
         client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
-            messages=messages,
+            messages=_build_prompt(),
         ).choices[0].message.content
     )
 
-    # --- Validate -------------------------------------------------------
+    # — Validation -------------------------------------------------------
     if "error" in draft:
         raise ValueError(draft["error"])
 
-    required = {"to", "subject", "body"}
-    if not required.issubset(draft.keys()):
-        raise ValueError(f"Missing keys in e-mail draft: {draft}")
+    for key in ("to", "subject", "body"):
+        if key not in draft or not draft[key]:
+            raise ValueError(f"missing {key}")
 
-    # --- Send via Outlook ----------------------------------------------
-    _send_outlook_mail(draft, access_token)
-    logging.info("✓ Outlook mail sent: %s → %s", draft["subject"], draft["to"])
+    # — Send e-mail ------------------------------------------------------
+    _send_outlook(draft, access_token)
+    logging.info("✓ Outlook e-mail sent: %s → %s",
+                 draft["subject"], ", ".join(draft["to"]))
 
-    # --- Persist assistant turn ----------------------------------------
+    # — Persist assistant turn ------------------------------------------
     reply_txt = f"✉️ E-mail sent: “{draft['subject']}” ➜ {', '.join(draft['to'])}"
-    chat_type = next((row["chat_type"] for row in chat_mem if row.get("chat_type")), None)
+    chat_type = next((r.get("chat_type") for r in chat_mem if r.get("chat_type")), None)
     save_message(chat_id, "assistant", reply_txt, chat_type or "unknown")
