@@ -38,15 +38,18 @@ def _embed(text: str) -> list[float]:
 
 
 # ─── public helpers ─────────────────────────────────────────────────────
-def save_message(chat_id: str, sender: str, content: str) -> None:
-    """Insert one row together with its embedding.  Log any failure."""
+def save_message(chat_id: str, sender: str, content: str, chat_type: str):
     row = {
-        "chat_id":   chat_id,
-        "sender":    sender,                       # "user" | "assistant"
-        "content":   content,
-        "timestamp": _dt.datetime.utcnow().isoformat(),
-        "embedding": _vector_literal(_embed(content)),
+        "id": str(uuid.uuid4()),
+        "chat_id": chat_id,
+        "sender": sender,
+        "content": content,
+        "chat_type": chat_type,   # ← new
+        "timestamp": datetime.utcnow().isoformat(),
+        # … embedding calc …
     }
+    supabase.table("message_history").insert(row).execute()
+
 
     try:
         resp = supabase.table("message_history").insert(row).execute()
@@ -58,7 +61,7 @@ def save_message(chat_id: str, sender: str, content: str) -> None:
         _log.exception("Supabase insert raised – %s – payload=%s", exc, row)
 
 
-def fetch_chat_history(chat_id: str, limit: int = 10) -> list[dict]:
+def fetch_chat_history(chat_id: str, limit: int = 15) -> list[dict]:
     resp = (
         supabase.table("message_history")
         .select("sender,content")
