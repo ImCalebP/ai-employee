@@ -1,14 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # services/intent_api/contact_agent.py
 """
-Tiny CRUD helper for the `contacts` table (now includes `name`).
+Ultra-light CRUD helper for the `contacts` table.
 
-Schema
-------
+Columns
+-------
 id               int8  (PK, auto)
 created_at       timestamptz
 email            text
-name             text
+name             text           <-- NEW
 role             text
 conversation_id  text
 phone            text
@@ -18,15 +18,15 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
-from common.supabase import supabase
+from common.supabase import supabase  # your configured client
 
 logging.getLogger(__name__).setLevel(logging.INFO)
 _TBL = "contacts"
 
 
 # ───────── internal helpers ─────────
-def _norm(mail: str) -> str:
-    return mail.strip().lower()
+def _norm(email: str) -> str:
+    return email.strip().lower()
 
 
 def _row(resp) -> Optional[Dict[str, Any]]:
@@ -59,7 +59,7 @@ def get_contact(
             .execute()
         )
     else:
-        raise ValueError("get_contact(): supply id, email, or conversation_id")
+        raise ValueError("get_contact() needs id, email, or conversation_id")
     return _row(resp)
 
 
@@ -93,7 +93,6 @@ def create_contact(
 
 
 def update_contact(contact_id: int, **fields) -> Dict[str, Any]:
-    """Patch selected columns (email cannot be changed)."""
     if not fields:
         raise ValueError("update_contact(): nothing to update")
     resp = supabase.table(_TBL).update(fields).eq("id", contact_id).execute()
@@ -130,5 +129,4 @@ def upsert_contact(
         patch["phone"] = phone
     if conversation_id and not existing.get("conversation_id"):
         patch["conversation_id"] = conversation_id
-
     return update_contact(existing["id"], **patch) if patch else existing
