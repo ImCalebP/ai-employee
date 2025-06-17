@@ -14,6 +14,7 @@ import os
 import uuid 
 from openai import OpenAI
 from common.supabase import supabase
+from datetime import datetime
 
 # ─── OpenAI embedding setup ─────────────────────────────────────────────
 _client       = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
