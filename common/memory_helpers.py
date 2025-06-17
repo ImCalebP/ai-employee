@@ -2,9 +2,9 @@
 """
 Read / write helper for the **message_history** table
 ────────────────────────────────────────────────────
-• Saves every turn together with an OpenAI embedding (pgvector)
-• Tier-1 recall  = last-N messages by chat_id  (+ small global slice)
-• Tier-2 recall  = pgvector similarity search via `match_messages` RPC
+• Persists every turn together with an OpenAI embedding (pgvector)
+• Tier-1 recall  = last-N messages per chat (+ a thin global slice)
+• Tier-2 recall  = pgvector similarity search via `match_messages`
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from openai import OpenAI
-
 from common.supabase import supabase
 
 # ─────────────────────────  OpenAI Embeddings  ──────────────────────────
@@ -26,19 +25,18 @@ _EMBED_MODEL = "text-embedding-3-small"           # 1 k tokens · 1536 dims
 
 def _embed(text: str) -> List[float]:
     """
-    Call the embeddings endpoint (truncate input at 4 k chars – hard limit).
+    Call the embeddings endpoint (truncate at 4 k chars – endpoint limit).
     """
     resp = _CLIENT.embeddings.create(model=_EMBED_MODEL, input=text[:4000])
     return resp.data[0].embedding
 
 
-# ─────────────────────────  pgvector literal  ───────────────────────────
+# ─────────────────────────  pgvector helper  ────────────────────────────
 def _vector_literal(vec: List[float]) -> str:
     """
-    Format a list of floats as a pgvector literal (pgvector ≥ 0.5 syntax).
-
-    Example →  '[0.1234567,-0.0012345,…]'
-    We round to 7 dp – plenty for cosine similarity while keeping rows small.
+    Format a list of floats as a pgvector literal (pgvector ≥ 0.5 syntax):
+    >>> _vector_literal([0.1, -0.2])
+    '[0.1000000,-0.2000000]'
     """
     return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
 
@@ -51,25 +49,23 @@ def save_message(
     chat_type: str | None = None,   # "oneOnOne" | "group" | None
 ) -> None:
     """
-    Store a message in **message_history** with its embedding.
+    Persist one message row with its embedding.
 
     Parameters
     ----------
-    chat_id     Teams conversation / chat ID
+    chat_id     Teams chat / conversation ID
     sender      "user" | "assistant"
-    content     Raw text
-    chat_type   "oneOnOne", "group", … (from Graph `chatType`) – optional
+    content     Message body (plain text)
+    chat_type   Optional Graph `chatType` ("oneOnOne", "group", …)
     """
-    embedding = _embed(content)
-
     row: Dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "chat_id": chat_id,
         "sender": sender,
         "content": content,
         "chat_type": chat_type,
-        "timestamp": datetime.utcnow().isoformat(),
-        "embedding": _vector_literal(embedding),
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        "embedding": _vector_literal(_embed(content)),
     }
 
     try:
@@ -82,7 +78,7 @@ def save_message(
 
 def fetch_chat_history(chat_id: str, limit: int = 15) -> List[Dict]:
     """
-    Last-N messages for a given chat, oldest → newest (ascending).
+    Last-`limit` messages for this chat, oldest → newest.
     """
     resp = (
         supabase.table("message_history")
@@ -97,7 +93,7 @@ def fetch_chat_history(chat_id: str, limit: int = 15) -> List[Dict]:
 
 def fetch_global_history(limit: int = 5) -> List[Dict]:
     """
-    Thin global slice – newest first, then reversed to oldest → newest.
+    Global slice – newest first, then reversed (so GPT sees chronological order).
     """
     resp = (
         supabase.table("message_history")
@@ -111,7 +107,7 @@ def fetch_global_history(limit: int = 5) -> List[Dict]:
 
 def semantic_search(query: str, k: int = 5) -> List[Dict]:
     """
-    Tier-2 recall – cosine search in pgvector via `match_messages` RPC.
+    Tier-2 recall – cosine search in pgvector via the `match_messages` RPC.
     """
     resp = supabase.rpc(
         "match_messages",
