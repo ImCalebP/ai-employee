@@ -1,5 +1,5 @@
 """
-Delegated Microsoft Graph auth helper
+Delegated Microsoft Graph auth helper test
 =====================================
 • Stores a refresh-token in Supabase under 'tokens' table
 • Automatically refreshes access tokens for the Chat.ReadWrite scope
