@@ -88,7 +88,7 @@ def process_reply(
         "role": "system",
         "content": (
             "You are John, a concise yet friendly executive assistant.\n"
-            "Reply in ≤120 words. Use context when helpful. Plain text only."
+            "Reply in ≤120 words. Use context when helpful. Answer with a bit of humour Plain text only."
         ),
     }]
     _add(msgs, chat_mem)
