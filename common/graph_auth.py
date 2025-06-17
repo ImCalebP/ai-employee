@@ -1,45 +1,43 @@
 """
 Delegated Microsoft Graph auth helper
 =====================================
-• Stores an encrypted refresh-token in /tmp/rt.enc (swap for Supabase if desired)
+• Stores a refresh-token in Supabase under 'tokens' table
 • Automatically refreshes access tokens for the Chat.ReadWrite scope
 """
 
-import os, base64
+import os
 from typing import Tuple
-from cryptography.fernet import Fernet
 from msal import ConfidentialClientApplication
+from supabase import create_client
 
-# ───── Environment secrets ───────────────────────────────────────────────
-CLIENT_ID        = os.getenv("MS_CLIENT_ID")
-CLIENT_SECRET    = os.getenv("MS_CLIENT_SECRET")
-TENANT_ID        = os.getenv("MS_TENANT_ID")
-TOKEN_ENCRYPT_KEY = os.getenv("TOKEN_ENCRYPT_KEY")  # 32-char random string
+# ───── Environment variables ─────────────────────────────────────────────
+CLIENT_ID     = os.getenv("MS_CLIENT_ID")
+CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
+TENANT_ID     = os.getenv("MS_TENANT_ID")
+SUPABASE_URL  = os.getenv("SUPABASE_URL")
+SUPABASE_KEY  = os.getenv("SUPABASE_KEY")
 
-# ───── Authority & scopes ────────────────────────────────────────────────
+# ───── Supabase client ───────────────────────────────────────────────────
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ───── MS Graph scopes and authority ─────────────────────────────────────
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-
-# 👉 **ONLY** delegated Graph scopes here.
-#     MSAL will implicitly add "openid profile offline_access" in the auth-code flow.
 SCOPES = ["Chat.ReadWrite"]
 
-# ───── Encrypt / decrypt refresh token ───────────────────────────────────
-FERNET = Fernet(
-    base64.urlsafe_b64encode(TOKEN_ENCRYPT_KEY.encode().ljust(32)[:32])
-)
-
+# ───── Supabase helpers for refresh token ────────────────────────────────
 def _save_refresh_token(rt: str):
-    with open("/tmp/rt.enc", "w") as f:
-        f.write(FERNET.encrypt(rt.encode()).decode())
+    existing = supabase.table("tokens").select("id").eq("name", "teams").execute()
+    if existing.data:
+        supabase.table("tokens").update({"refresh_token": rt}).eq("name", "teams").execute()
+    else:
+        supabase.table("tokens").insert({"name": "teams", "refresh_token": rt}).execute()
 
 
 def _load_refresh_token() -> str | None:
-    try:
-        enc = open("/tmp/rt.enc").read()
-        return FERNET.decrypt(enc.encode()).decode()
-    except FileNotFoundError:
-        return None
-
+    result = supabase.table("tokens").select("refresh_token").eq("name", "teams").limit(1).execute()
+    if result.data and result.data[0].get("refresh_token"):
+        return result.data[0]["refresh_token"]
+    return None
 
 # ───── MSAL app factory ──────────────────────────────────────────────────
 def get_msal_app() -> ConfidentialClientApplication:
@@ -49,13 +47,12 @@ def get_msal_app() -> ConfidentialClientApplication:
         authority=AUTHORITY,
     )
 
-
 # ───── Exchange auth-code for tokens (called from /auth/callback) ────────
 def exchange_code_for_tokens(code: str, redirect_uri: str):
     app = get_msal_app()
     result = app.acquire_token_by_authorization_code(
         code,
-        scopes=SCOPES,          # MSAL auto-adds openid profile offline_access
+        scopes=SCOPES,
         redirect_uri=redirect_uri,
     )
     if "refresh_token" in result:
@@ -63,26 +60,23 @@ def exchange_code_for_tokens(code: str, redirect_uri: str):
     else:
         raise RuntimeError(f"Auth-code exchange failed: {result.get('error_description')}")
 
-
-# ───── Get fresh access token on demand ───────────────────────────────────
+# ───── Get fresh access token on demand ──────────────────────────────────
 def get_access_token() -> Tuple[str, int]:
     """
     Returns (access_token, expires_in_seconds).
-    Raises RuntimeError if the user has never completed /auth/login.
+    Raises RuntimeError if no refresh token is stored.
     """
     rt = _load_refresh_token()
     if not rt:
         raise RuntimeError("No refresh token stored – complete interactive login first.")
 
     app = get_msal_app()
-    token = app.acquire_token_by_refresh_token(rt, scopes=SCOPES)
+    result = app.acquire_token_by_refresh_token(rt, scopes=SCOPES)
 
-    if "access_token" in token:
-        return token["access_token"], token["expires_in"]
+    if "access_token" in result:
+        new_rt = result.get("refresh_token")
+        if new_rt and new_rt != rt:
+            _save_refresh_token(new_rt)
+        return result["access_token"], result["expires_in"]
 
-    # Refresh token expired / revoked – delete cached file and fail hard
-    try:
-        os.remove("/tmp/rt.enc")
-    except FileNotFoundError:
-        pass
-    raise RuntimeError(f"Failed to refresh token: {token.get('error_description')}")
+    raise RuntimeError(f"Failed to refresh token: {result.get('error_description')}")
