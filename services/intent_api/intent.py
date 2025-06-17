@@ -133,14 +133,17 @@ async def webhook_handler(payload: TeamsWebhookPayload):
 
     # 8️⃣  Generate structured response ----------------------------------
     schema = {
-        "role": "system",
-        "content": (
-            "Return ONE **json** object only.\n\n"
-            'E-mail draft → {"intent":"send_email","reply":"…","emailDetails":{…}}\n'
-            'Normal reply → {"intent":"reply","reply":"…"}\n'
-            "Never invent e-mail addresses – ask the user."
-        ),
-    }
+    "role": "system",
+    "content": (
+        "Return ONE **json** object only.\n\n"
+        'If all details (recipient\'s real email, subject, body) are present, respond:\n'
+        '{"intent":"send_email","reply":"…","emailDetails":{...}}\n'
+        'If the recipient email is missing or unclear, respond:\n'
+        '{"intent":"reply","reply":"Please provide the recipient\'s email address."}\n'
+        "Never invent or guess e-mail addresses – ask the user for any missing details."
+    ),
+}
+
 
     parsed: Dict[str, Any] = json.loads(
         client.chat.completions.create(
