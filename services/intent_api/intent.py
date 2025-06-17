@@ -3,7 +3,7 @@
 """
 FastAPI webhook that receives Power-Automate payloads, chats as **John**
 (a professional corporate lawyer), stores memory in Supabase, recalls extra
-context with pgvector **and** can send Outlook e-mails ― **only after an
+context with pgvector **and** can send Outlook e-mails — **only after an
 explicit user confirmation**.
 
 • One-time interactive login:  GET  /auth/login   (stores encrypted refresh-token)
@@ -45,7 +45,7 @@ from common.memory_helpers import (
 )
 
 # ─────────────────────────  Outlook helper  ─────────────────────────────
-from services.intent_api.email_agent import send_with_outlook  # <-- already sends
+from services.intent_api.email_agent import send_with_outlook  # already sends
 
 # ─────────────────────────  FastAPI basics  ─────────────────────────────
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
@@ -161,7 +161,7 @@ async def webhook_handler(payload: TeamsWebhookPayload):
     confirm = bool(re.fullmatch(r"\s*(yes|send|okay|go ahead)\s*\.?", text, re.I))
     if draft and confirm:
         details = json.loads(draft["details"])
-        send_with_outlook(details)  # <-- actually sends via Graph SMTP/REST
+        send_with_outlook(details)  # actually sends via Graph SMTP/REST
         _mark_draft_sent(draft["id"])
         reply_txt = "📧 Email sent as requested."
         save_message(chat_id, "assistant", reply_txt)
@@ -185,18 +185,29 @@ async def webhook_handler(payload: TeamsWebhookPayload):
         }
     ]
     for row in chat_mem:
-        messages.append({"role": "user" if row["sender"] == "user" else "assistant", "content": row["content"]})
+        messages.append(
+            {
+                "role": "user" if row["sender"] == "user" else "assistant",
+                "content": row["content"],
+            }
+        )
     if global_mem:
         messages.append({"role": "system", "content": "Context from other chats:"})
         for row in global_mem:
-            messages.append({"role": "user" if row["sender"] == "user" else "assistant", "content": row["content"]})
+            messages.append(
+                {
+                    "role": "user" if row["sender"] == "user" else "assistant",
+                    "content": row["content"],
+                }
+            )
     messages.append({"role": "user", "content": text})
 
     # ─── 5. Need more memory? -------------------------------------------
     need_prompt = {
         "role": "system",
         "content": (
-            'Respond ONLY {"need_memory":true} or {"need_memory":false} – nothing else.'
+            "Answer with a **json** object only, either "
+            '{"need_memory": true} or {"need_memory": false}.'
         ),
     }
     first = client.chat.completions.create(
@@ -212,16 +223,21 @@ async def webhook_handler(payload: TeamsWebhookPayload):
             messages.append({"role": "system", "content": "Additional memories:"})
             for row in mem_matches:
                 messages.append(
-                    {"role": "user" if row["sender"] == "user" else "assistant", "content": row["content"]}
+                    {
+                        "role": "user" if row["sender"] == "user" else "assistant",
+                        "content": row["content"],
+                    }
                 )
 
     # ─── 6. Final structured answer -------------------------------------
     schema = {
         "role": "system",
         "content": (
-            "Output ONLY one JSON object.\n\n"
-            'For an e-mail draft:\n{"intent":"send_email","reply":"…","emailDetails":{"to":[],"subject":"","body":""}}\n\n'
-            'For a normal reply:\n{"intent":"reply","reply":"…"}\n'
+            "Return **one** lower-case **json** object and nothing else.\n\n"
+            'For an e-mail draft:\n'
+            '{"intent":"send_email","reply":"…","emailDetails":{"to":[],"subject":"","body":""}}\n\n'
+            'For a normal reply:\n'
+            '{"intent":"reply","reply":"…"}\n'
             "Never invent an address; ask if unknown."
         ),
     }
