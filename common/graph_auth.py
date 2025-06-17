@@ -22,7 +22,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ───── MS Graph scopes and authority ─────────────────────────────────────
 AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPES = ["Chat.ReadWrite"]
+SCOPES = ["Chat.ReadWrite", "Mail.Send"]
 
 # ───── Supabase helpers for refresh token ────────────────────────────────
 def _save_refresh_token(rt: str):
