@@ -22,6 +22,7 @@ from services.intent_api.reply_agent import process_reply
 from services.intent_api.contact_agent import (
     list_contacts, get_contact, upsert_contact
 )
+import os  
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.getLogger(__name__).setLevel(logging.INFO)
