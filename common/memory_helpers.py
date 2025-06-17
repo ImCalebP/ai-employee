@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging as _log
 import os
-
+import uuid 
 from openai import OpenAI
 from common.supabase import supabase
 
