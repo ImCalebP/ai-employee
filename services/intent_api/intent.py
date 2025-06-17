@@ -3,8 +3,7 @@
 """
 FastAPI webhook that receives Power-Automate payloads, chats as **John**
 (a professional corporate lawyer), stores memory in Supabase, recalls extra
-context with pgvector **and** can send Outlook e-mails — **only after an
-explicit user confirmation**.
+context with pgvector **and** can send Outlook e-mails when the LLM tells it to.
 
 • One-time interactive login:  GET  /auth/login   (stores encrypted refresh-token)
 • Graph access-token refresh:  automatic via common.graph_auth
@@ -14,10 +13,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
-import uuid
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -30,22 +27,21 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ─────────────────────────  Graph auth helpers  ──────────────────────────
 from common.graph_auth import (
+    get_msal_app,
     exchange_code_for_tokens,
     get_access_token,
-    get_msal_app,
 )
 
 # ─────────────────────────  Memory helpers  ─────────────────────────────
 from common.memory_helpers import (
+    save_message,
     fetch_chat_history,
     fetch_global_history,
-    save_message,
     semantic_search,
-    supabase,  # re-exported Supabase client
 )
 
-# ─────────────────────────  Outlook helper  ─────────────────────────────
-from services.intent_api.email_agent import send_with_outlook  # already sends
+# ─────────────────────────  E-mail helper  ───────────────────────────────
+from services.intent_api.email_agent import process_email_request  # new
 
 # ─────────────────────────  FastAPI basics  ─────────────────────────────
 REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
@@ -53,62 +49,13 @@ REDIRECT_URI = "https://ai-employee-28l9.onrender.com/auth/callback"
 app = FastAPI(title="AI-Employee • intent handler")
 logging.basicConfig(level=logging.INFO)
 
-# ─────────────────────────  Draft helpers  ──────────────────────────────
-DRAFT_TABLE = "email_drafts"
-
-
-def _save_draft(chat_id: str, details: Dict[str, Any]) -> str:
-    draft_id = str(uuid.uuid4())
-    supabase.table(DRAFT_TABLE).insert(
-        {
-            "id": draft_id,
-            "chat_id": chat_id,
-            "details": json.dumps(details),
-            "status": "pending",
-            "created_at": datetime.utcnow().isoformat(),
-        }
-    ).execute()
-    return draft_id
-
-
-def _get_pending_draft(chat_id: str) -> Dict[str, Any] | None:
-    resp = (
-        supabase.table(DRAFT_TABLE)
-        .select("id,details")
-        .eq("chat_id", chat_id)
-        .eq("status", "pending")
-        .limit(1)
-        .execute()
-    )
-    return resp.data[0] if resp.data else None
-
-
-def _mark_draft_sent(draft_id: str):
-    supabase.table(DRAFT_TABLE).update({"status": "sent"}).eq("id", draft_id).execute()
-
-
-# ─────────────────────────  Teams helpers  ──────────────────────────────
-def send_teams_reply(chat_id: str, message: str, token: str) -> int:
-    resp = requests.post(
-        f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"body": {"contentType": "text", "content": message}},
-        timeout=10,
-    )
-    return resp.status_code
-
-
-# ─────────────────────────  Webhook model  ──────────────────────────────
-class TeamsWebhookPayload(BaseModel):
-    messageId: str
-    conversationId: str
-
 
 # ─────────────────────────  Auth endpoints  ─────────────────────────────
 @app.get("/auth/login")
 def auth_login() -> RedirectResponse:
+    """Run ONCE manually – stores an encrypted refresh-token."""
     url = get_msal_app().get_authorization_request_url(
-        scopes=["Chat.ReadWrite"],
+        scopes=["Chat.ReadWrite"],  # MSAL auto-adds openid profile offline_access
         redirect_uri=REDIRECT_URI,
         state="ai-login",
         prompt="login",
@@ -128,150 +75,186 @@ def auth_callback(code: str | None = None, error: str | None = None) -> HTMLResp
     return HTMLResponse("<h2>✅ Login successful — you can close this tab.</h2>")
 
 
+# ─────────────────────────  Teams helpers  ──────────────────────────────
+def send_teams_reply(chat_id: str, message: str, token: str) -> tuple[int, str]:
+    resp = requests.post(
+        f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "body": {
+                "contentType": "text",
+                "content": message,
+            }
+        },
+        timeout=10,
+    )
+    return resp.status_code, resp.text
+
+
+# ─────────────────────────  Webhook model  ──────────────────────────────
+class TeamsWebhookPayload(BaseModel):
+    messageId: str
+    conversationId: str
+
+
 # ─────────────────────────  Main webhook  ───────────────────────────────
 @app.post("/webhook")
 async def webhook_handler(payload: TeamsWebhookPayload):
     chat_id, msg_id = payload.conversationId, payload.messageId
     logging.info("→ webhook chat=%s msg=%s", chat_id, msg_id)
 
-    # ─── 0. Graph token ────────────────────────────────────────────────
+    # ─── 1. Graph token ────────────────────────────────────────────────
     try:
         access_token, _ = get_access_token()
     except RuntimeError:
-        raise HTTPException(401, "Run /auth/login once from a browser first.")
-
-    # ─── 1. Fetch the full Teams message ───────────────────────────────
-    msg = (
-        requests.get(
-            f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{msg_id}",
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=10,
+        raise HTTPException(
+            401,
+            "Refresh-token missing. Run /auth/login once in a browser and sign in.",
         )
-        .json()
+
+    # ─── 2. Fetch the full Teams message ───────────────────────────────
+    ms_resp = requests.get(
+        f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{msg_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
     )
+    ms_resp.raise_for_status()
+    msg = ms_resp.json()
+
     sender = (msg.get("from") or {}).get("user", {}).get("displayName", "Unknown")
     text = (msg.get("body") or {}).get("content", "").strip()
 
-    # ignore bot / blank
+    # ignore our own bot / blank
     if sender == "BARA Software" or not text:
         return {"status": "skipped"}
 
-    # ─── 2. Check confirmation for a pending draft ──────────────────────
-    draft = _get_pending_draft(chat_id)
-    confirm = bool(re.fullmatch(r"\s*(yes|send|okay|go ahead)\s*\.?", text, re.I))
-    if draft and confirm:
-        details = json.loads(draft["details"])
-        send_with_outlook(details)  # actually sends via Graph SMTP/REST
-        _mark_draft_sent(draft["id"])
-        reply_txt = "📧 Email sent as requested."
-        save_message(chat_id, "assistant", reply_txt)
-        send_teams_reply(chat_id, reply_txt, access_token)
-        return {"status": "sent", "email_sent": True}
-
-    # ─── 3. Persist user turn ───────────────────────────────────────────
+    # ─── 3. Persist user turn  ──────────────────────────────────────────
     save_message(chat_id, "user", text)
 
-    # ─── 4. Tier-1 memory ------------------------------------------------
-    chat_mem: List[Dict[str, str]] = fetch_chat_history(chat_id, limit=10)
-    global_mem: List[Dict[str, str]] = fetch_global_history(limit=5)
+    # ─── 4. Tier-1 memory  ──────────────────────────────────────────────
+    chat_mem   = fetch_chat_history(chat_id, limit=10)
+    global_mem = fetch_global_history(limit=5)
 
-    messages: List[Dict[str, str]] = [
+    base_messages: list[dict[str, Any]] = [
         {
             "role": "system",
             "content": (
-                "You are **John**, an experienced corporate lawyer. "
-                "Reply formally and concisely."
+                "You are **John**, a highly experienced corporate lawyer at a large "
+                "firm. Respond formally, confidently and concisely, avoiding "
+                "unnecessary jargon."
             ),
         }
     ]
-    for row in chat_mem:
-        messages.append(
-            {
-                "role": "user" if row["sender"] == "user" else "assistant",
-                "content": row["content"],
-            }
-        )
-    if global_mem:
-        messages.append({"role": "system", "content": "Context from other chats:"})
-        for row in global_mem:
-            messages.append(
-                {
-                    "role": "user" if row["sender"] == "user" else "assistant",
-                    "content": row["content"],
-                }
-            )
-    messages.append({"role": "user", "content": text})
 
-    # ─── 5. Need more memory? -------------------------------------------
+    # recent chat history
+    for row in chat_mem:
+        role = "user" if row["sender"] == "user" else "assistant"
+        base_messages.append({"role": role, "content": row["content"]})
+
+    # thin global slice
+    if global_mem:
+        base_messages.append(
+            {"role": "system", "content": "Context from other recent chats:"}
+        )
+        for row in global_mem:
+            role = "user" if row["sender"] == "user" else "assistant"
+            base_messages.append({"role": role, "content": row["content"]})
+
+    # user’s new message
+    base_messages.append({"role": "user", "content": text})
+
+    # ─── 5. Pass-1: ask if we need more memory  ─────────────────────────
     need_prompt = {
         "role": "system",
         "content": (
-            "Answer with a **json** object only, either "
-            '{"need_memory": true} or {"need_memory": false}.'
+            "If you still need earlier context OUTSIDE what you see, "
+            'reply ONLY with JSON: {"need_memory": true, "reason": "..."} '
+            'Otherwise reply ONLY with JSON: {"need_memory": false}'
         ),
     }
+
     first = client.chat.completions.create(
         model="gpt-4o-mini",
         response_format={"type": "json_object"},
-        messages=messages + [need_prompt],
+        messages=base_messages + [need_prompt],
     ).choices[0].message
-    need_more = json.loads(first.content).get("need_memory", False)
 
-    if need_more:
-        mem_matches = semantic_search(text, k=5)
-        if mem_matches:
-            messages.append({"role": "system", "content": "Additional memories:"})
-            for row in mem_matches:
-                messages.append(
-                    {
-                        "role": "user" if row["sender"] == "user" else "assistant",
-                        "content": row["content"],
-                    }
-                )
+    need_memory = False
+    try:
+        need_memory = json.loads(first.content).get("need_memory", False)
+    except Exception:  # noqa: BLE001
+        pass  # weird answer → assume no extra memory
 
-    # ─── 6. Final structured answer -------------------------------------
-    schema = {
+    # ─── 6. Tier-2 recall if requested ──────────────────────────────────
+    extra_memory: list[dict[str, str]] = []
+    if need_memory:
+        matches = semantic_search(text, k=5)
+        if matches:
+            extra_memory.append({"role": "system", "content": "Additional memories:"})
+            for row in matches:
+                role = "user" if row["sender"] == "user" else "assistant"
+                extra_memory.append({"role": role, "content": row["content"]})
+
+    # ─── 7. Pass-2: final structured answer  ────────────────────────────
+    format_instruction = {
         "role": "system",
         "content": (
-            "Return **one** lower-case **json** object and nothing else.\n\n"
-            'For an e-mail draft:\n'
-            '{"intent":"send_email","reply":"…","emailDetails":{"to":[],"subject":"","body":""}}\n\n'
-            'For a normal reply:\n'
-            '{"intent":"reply","reply":"…"}\n'
-            "Never invent an address; ask if unknown."
+            "When you answer, output **ONLY a single JSON object**.\n\n"
+            "If the user wants you to write & send an e-mail, use:\n"
+            '{\n'
+            '  "intent": "send_email",\n'
+            '  "reply":   "What you will tell the user back in Teams",\n'
+            '  "emailDetails": {\n'
+            '    "to":     ["a@example.com", "b@example.com"],\n'
+            '    "subject":"...",\n'
+            '    "body":   "..."  \n'
+            '  }\n'
+            '}\n\n'
+            "If you’re just replying normally, use:\n"
+            '{\n'
+            '  "intent": "reply",\n'
+            '  "reply":  "Your message here"\n'
+            '}\n\n'
+            "NEVER invent unknown e-mail addresses – ask the user instead."
         ),
     }
-    final = client.chat.completions.create(
+
+    final_resp = client.chat.completions.create(
         model="gpt-4o-mini",
         response_format={"type": "json_object"},
-        messages=messages + [schema],
+        messages=base_messages + extra_memory + [format_instruction],
     ).choices[0].message
+
+    # ─── 8. Parse & act  ────────────────────────────────────────────────
     try:
-        parsed = json.loads(final.content)
+        parsed: dict[str, Any] = json.loads(final_resp.content)
     except json.JSONDecodeError:
-        parsed = {"intent": "reply", "reply": final.content.strip()}
+        parsed = {"intent": "reply", "reply": final_resp.content.strip()}
 
-    intent = parsed.get("intent", "reply")
-    reply = parsed.get("reply", "").strip()
+    intent  = parsed.get("intent", "reply")
+    reply   = parsed.get("reply", "").strip()
+    sent_ok = False
 
-    # ─── 7. Intent branch -------------------------------------------------
     if intent == "send_email":
-        draft_id = _save_draft(chat_id, parsed["emailDetails"])
-        pretty_list = ", ".join(parsed["emailDetails"]["to"])
-        preview = (
-            f"📄 **Draft e-mail** to {pretty_list} (ID `{draft_id}`):\n\n"
-            f"**Subject:** {parsed['emailDetails']['subject']}\n\n"
-            f"{parsed['emailDetails']['body']}\n\n"
-            "Reply with **yes** to send it."
-        )
-        reply = preview
+        try:
+            process_email_request(parsed["emailDetails"])  # may raise
+            sent_ok = True
+            logging.info("✓ Outlook e-mail sent")
+        except Exception as exc:  # noqa: BLE001
+            # tell the user what went wrong
+            reply = f"⚠️ I couldn’t send the e-mail: {exc}"
+            logging.exception("Email sending failed")
 
-    # ─── 8. Persist & send back to Teams ---------------------------------
+    # ─── 9. Persist assistant turn & send back to Teams  ────────────────
     save_message(chat_id, "assistant", reply)
-    status = send_teams_reply(chat_id, reply, access_token)
+    status, body = send_teams_reply(chat_id, reply, access_token)
 
     return {
-        "status": "sent" if status == 201 else "graph_error",
+        "status": "sent" if status == 201 else f"graph_error:{body}",
         "intent": intent,
+        "email_sent": sent_ok,
         "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
     }
