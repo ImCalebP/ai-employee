@@ -46,28 +46,28 @@ def _teams_post(chat_id: str, text: str, token: str) -> int:
     ).status_code
 
 
+# seules lignes modifiées marquées ▼
 def process_reply(
     chat_id: str,
     last_user_text: str,
     missing_info: str | None = None,
+    custom_prompt: str | None = None,          # ▼ nouveau
 ) -> None:
-    """
-    Send a reply. If missing_info is given, ask for that field directly;
-    otherwise build a normal GPT response.
-    """
     access_token, _ = get_access_token()
 
-    # --- immediate ask branch -----------------------------------------
+    # -- branche question directe -----------------
     if missing_info:
-        ask = {
-            "recipients": "Could you share the e-mail address(es) to send this to?",
-            "subject":    "What subject line would you like?",
-            "body":       "What should the body of the e-mail say?",
-        }[missing_info]
+        ask = (custom_prompt or {                # ▼ utilise custom_prompt si fourni
+            "recipients": "Peux-tu me donner l’adresse e-mail ?",
+            "subject":    "Quel sujet aimerais-tu ?",
+            "body":       "Que doit-on écrire dans le corps ?",
+        }[missing_info])
         _teams_post(chat_id, ask, access_token)
         save_message(chat_id, "assistant", ask, "unknown")
         logging.info("✓ prompt for %s sent", missing_info)
         return
+    ...
+
 
     # --- normal GPT reply ---------------------------------------------
     chat_type = _graph(
