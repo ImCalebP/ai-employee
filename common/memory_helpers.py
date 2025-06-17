@@ -1,112 +1,154 @@
 """
-Unified memory layer for all agents
-───────────────────────────────────
-* Persists every turn with pgvector embeddings
-* Tier-1  : last-N chronological messages per chat
-* Tier-2  : semantic search in-chat, then global
+Read / write helpers for the **message_history** table
+──────────────────────────────────────────────────────
+• Persists every turn together with an OpenAI embedding (pgvector)
+• Tier-1 recall  = last-N messages per chat  (+ small global slice)
+• Tier-2 recall  = semantic search (first inside the chat, then global)
+──────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
-import os, uuid, logging as _log
-from datetime import datetime as _dt
+
+import logging as _log
+import os
+import uuid
+from datetime import datetime
 from typing import Any, Dict, List
 
-from supabase import create_client, Client           # pip install supabase
-from openai import OpenAI                            # pip install openai
+from openai import OpenAI
+from common.supabase import supabase
 
-# ──────────────────── Supabase & OpenAI clients ────────────────────────
-_SUPA_URL   = os.getenv("SUPABASE_URL")
-_SUPA_KEY   = os.getenv("SUPABASE_SERVICE_KEY")
-_openai     = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-_supabase: Client = create_client(_SUPA_URL, _SUPA_KEY)
+# ─────────────────────────  OpenAI Embeddings  ──────────────────────────
+# text-embedding-3-large is much more accurate (3072 dims, 8 K context)
+_CLIENT = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+_EMBED_MODEL = "text-embedding-3-large"
+_EMBED_MAX_CHARS = 8192 * 4     # ≈8 K tokens → 4 chars / token
 
-_EMBED_MODEL      = "text-embedding-3-large"
-_EMBED_MAX_CHARS  = 8192 * 4                   # ≈ 8 K tokens × 4 chars
+def _embed(text: str) -> List[float]:
+    """
+    Create an embedding for *at most* the first _EMBED_MAX_CHARS.
+    """
+    snippet = text[:_EMBED_MAX_CHARS]
+    resp = _CLIENT.embeddings.create(model=_EMBED_MODEL, input=snippet)
+    return resp.data[0].embedding
 
+# ─────────────────────────  pgvector helper  ────────────────────────────
+def _vector_literal(vec: List[float]) -> str:
+    """
+    Render a python list as a pgvector literal. (pgvector ≥ 0.5 syntax)
+    >>> _vector_literal([0.1, -0.2]) -> '[0.1000000,-0.2000000]'
+    """
+    return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
 
-# ╭───────────────────────────  MemoryHelper  ───────────────────────────╮
-class MemoryHelper:
-    """Thread-safe helper shared by *all* agents."""
+# ─────────────────────────  Public helpers  ─────────────────────────────
+def save_message(
+    chat_id: str,
+    sender: str,
+    content: str,
+    chat_type: str | None = None,  # "oneOnOne" | "group" | None
+) -> None:
+    """
+    Persist one message row with its embedding.
+    """
+    row: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "chat_id": chat_id,
+        "sender": sender,
+        "content": content,
+        "chat_type": chat_type,
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        "embedding": _vector_literal(_embed(content)),
+    }
 
-    # ——— write ————————————————————————————————————————————————
-    @staticmethod
-    def save(chat_id: str, role: str, content: str,
-             chat_type: str | None = None) -> None:
-        row: Dict[str, Any] = {
-            "id":        str(uuid.uuid4()),
-            "chat_id":   chat_id,
-            "sender":    role,
-            "content":   content,
-            "chat_type": chat_type,
-            "timestamp": _dt.utcnow().isoformat(timespec="seconds"),
-            "embedding": MemoryHelper._vec_literal(MemoryHelper._embed(content)),
-        }
-        try:
-            _supabase.table("message_history").insert(row).execute()
-        except Exception as exc:
-            _log.exception("Supabase insert failed: %s · payload=%s", exc, row)
+    try:
+        resp = supabase.table("message_history").insert(row).execute()
+        if getattr(resp, "error", None):
+            _log.error("Supabase insert failed: %s · payload=%s", resp.error, row)
+    except Exception as exc:  # network / client error
+        _log.exception("Supabase insert raised: %s · payload=%s", exc, row)
 
-    # ——— tier-1 recall ————————————————————————————
-    @staticmethod
-    def last_messages(chat_id: str, limit: int = 30) -> List[Dict]:
-        res = (_supabase.table("message_history")
-               .select("sender,content")
-               .eq("chat_id", chat_id)
-               .order("timestamp", desc=False)
-               .limit(limit)
-               .execute())
-        return res.data or []
+# -------------  Tier-1: chronological slices  --------------------------
+def fetch_chat_history(chat_id: str, limit: int = 30) -> List[Dict]:
+    """
+    Last-`limit` messages for *this* chat, oldest → newest.
+    """
+    resp = (
+        supabase.table("message_history")
+        .select("sender,content")
+        .eq("chat_id", chat_id)
+        .order("timestamp", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return resp.data or []
 
-    @staticmethod
-    def global_slice(limit: int = 8) -> List[Dict]:
-        res = (_supabase.table("message_history")
-               .select("sender,content")
-               .neq("sender", "assistant")      # skip bot chatter
-               .order("timestamp", desc=True)
-               .limit(limit)
-               .execute())
-        return list(reversed(res.data or []))
+def fetch_global_history(limit: int = 8) -> List[Dict]:
+    """
+    Global slice – newest first, then reversed for chronological order.
+    Only assistant messages are skipped (they’re usually generic).
+    """
+    resp = (
+        supabase.table("message_history")
+        .select("sender,content")
+        .neq("sender", "assistant")
+        .order("timestamp", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return list(reversed(resp.data or []))
 
-    # ——— tier-2 semantic ————————————————————————————
-    @staticmethod
-    def semantic(query: str, chat_id: str,
-                 k_chat: int = 8, k_global: int = 4) -> List[Dict]:
-        emb = MemoryHelper._embed(query)
+# -------------  Tier-2: semantic search  -------------------------------
+#
+# Two small Postgres RPC helpers are expected (SQL below):
+#
+#   match_messages_in_chat(chat_id text, query_embedding vector, match_count int)
+#   match_messages_global(query_embedding vector, match_count int)
+#
+# They both return rows with (sender, content) ordered by cosine distance.
+#
+# A template for each function is included underneath the python code.
+# ----------------------------------------------------------------------
 
-        in_chat = (_supabase.rpc("match_messages_in_chat",
-                                 {"chat_id": chat_id,
-                                  "query_embedding": emb,
-                                  "match_count": k_chat})
-                   .execute()
-                   .data or [])
+def semantic_search(query: str, chat_id: str, k_chat: int = 8, k_global: int = 4) -> List[Dict]:
+    """
+    Hybrid search:
+      1. look *inside this chat*       → up to `k_chat` results
+      2. if < k_chat hits, search all  → up to `k_global` extra rows
+    Returns a *deduplicated* list (oldest → newest for coherence).
+    """
+    q_emb = _embed(query)
 
-        needed = k_chat - len(in_chat)
-        global_hits = []
-        if needed > 0 and k_global:
-            global_hits = (_supabase.rpc("match_messages_global",
-                                         {"query_embedding": emb,
-                                          "match_count": min(k_global, needed)})
-                           .execute()
-                           .data or [])
+    # --- in-chat --------------------------------------------------------
+    in_chat = (
+        supabase.rpc(
+            "match_messages_in_chat",
+            {"chat_id": chat_id, "query_embedding": q_emb, "match_count": k_chat},
+        )
+        .execute()
+        .data
+        or []
+    )
 
-        seen, ordered = set(), []
-        for row in reversed(in_chat + global_hits):
-            key = row["sender"] + row["content"]
-            if key not in seen:
-                seen.add(key)
-                ordered.append(row)
-        return ordered
+    # --- global fallback ------------------------------------------------
+    needed = max(0, k_chat - len(in_chat))
+    global_hits: List[Dict] = []
+    if needed > 0 and k_global > 0:
+        global_hits = (
+            supabase.rpc(
+                "match_messages_global",
+                {"query_embedding": q_emb, "match_count": min(k_global, needed)},
+            )
+            .execute()
+            .data
+            or []
+        )
 
-    # ——— private helpers ————————————————————————————
-    @staticmethod
-    def _embed(txt: str) -> List[float]:
-        snippet = txt[:_EMBED_MAX_CHARS]
-        return (_openai.embeddings
-                .create(model=_EMBED_MODEL, input=snippet)
-                .data[0]
-                .embedding)
-
-    @staticmethod
-    def _vec_literal(vec: List[float]) -> str:
-        return "[" + ",".join(f"{x:.7f}" for x in vec) + "]"
-# ╰──────────────────────────────────────────────────────────────────────╯
+    # --- oldest → newest & dedup ---------------------------------------
+    seen: set[str] = set()
+    ordered: List[Dict] = []
+    for row in reversed(in_chat + global_hits):  # newest last
+        key = row["sender"] + row["content"]
+        if key not in seen:
+            seen.add(key)
+            ordered.append(row)
+    return ordered
