@@ -116,7 +116,7 @@ async def webhook_handler(payload: TeamsWebhookPayload):
 
     intent = json.loads(
         client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",
             response_format={"type": "json_object"},
             messages=msgs,
         ).choices[0].message.content
