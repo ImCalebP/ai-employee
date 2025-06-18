@@ -194,10 +194,7 @@ def upsert_contact(
         patch["conversation_id"] = conversation_id
     return update_contact(existing["id"], **patch) if patch else existing
 
-
-# ════════════════════════════════════════
-# 3. Main reply logic
-# ════════════════════════════════════════
+    # ── 3 reply ───────────
 def process_reply(
     chat_id: str,
     last_user_text: str,
@@ -207,7 +204,7 @@ def process_reply(
     """
     Handle one user turn:
         • Ask for missing e-mail / subject / body if needed
-        • Else, generate an intelligent reply
+        • Else, generate an intelligent reply and handle contact CRUD
     """
     access_token, _ = get_access_token()
 
@@ -277,7 +274,7 @@ def process_reply(
         _add(msgs, global_mem)
     msgs.append({"role": "user", "content": last_user_text})
 
-    # ── 3.4 Call GPT-4o-mini to craft reply ─────────────────────────────
+    # ── 3.4 Call GPT to generate reply ───────────────────────────────────
     reply = (
         client.chat.completions.create(
             model="gpt-4o",
@@ -287,7 +284,26 @@ def process_reply(
         .message.content.strip()
     )
 
-    # ── 3.5 Send back to Teams and save memory ──────────────────────────
+    # ── 3.5 Check for known contact triggers ─────────────────────────────
+    lowered = last_user_text.lower()
+    if "delete contact" in lowered or "remove contact" in lowered:
+        contact = get_contact(conversation_id=chat_id)
+        if contact:
+            delete_contact(contact["id"])
+            reply = f"🗑️ Contact {contact.get('name') or contact['email']} deleted."
+        else:
+            reply = "I couldn't find a contact for this conversation."
+
+    elif "@" in last_user_text and ("remember" in lowered or "add contact" in lowered):
+        # Very simple extraction (for demo); in real code, parse more cleanly
+        words = last_user_text.split()
+        email = next((w for w in words if "@" in w), None)
+        name = next((w for w in words if w != email and "@" not in w), None)
+        if email:
+            upsert_contact(email=email, name=name, conversation_id=chat_id)
+            reply = f"✅ Contact {name or email} saved."
+
+    # ── 3.6 Send back to Teams and save memory ──────────────────────────
     status = _teams_post(chat_id, reply, access_token)
     save_message(chat_id, "assistant", reply, chat_type)
     logging.info("✓ reply sent (%s)", status)
