@@ -3,7 +3,7 @@ uvicorn[standard]
 httpx
 requests
 pydantic-settings
-openai>=1.0.0
+openai>=1.88.0
 msal                # Microsoft auth library
 cryptography        # token-encryption helper
 supabase>=2.4           # ← ADD THIS LINE
