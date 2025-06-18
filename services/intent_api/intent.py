@@ -95,14 +95,29 @@ async def webhook_handler(payload: TeamsWebhookPayload):
                         "content": r["content"]})
 
     msgs: List[Dict[str, str]] = [{
-        "role": "system",
-        "content": (
-            "Classify the user's intent. Two options only:\n"
-            "• send_email – user wants an Outlook e-mail sent now or soon\n"
-            "• reply      – any other request\n\n"
-            "Return ONE JSON exactly {\"intent\":\"send_email\"} or {\"intent\":\"reply\"}."
+    "role": "system",
+    "content": (
+        "You are an intelligent assistant specializing in understanding user needs based on recent message history. "
+        "Your job is to analyze the user’s most recent message along with the conversation context and return a single structured JSON object.\n\n"
+        "Your core responsibility is to decide the appropriate intent based on what the user is trying to accomplish. The possible intents are:\n"
+        "YOU HAVE ACCESS TO THINK TOOL, ALWAYS USE IT.\n\n"
+        "\"reply\" — respond conversationally or ask for missing info\n"
+        "\"meeting\" — schedule a meeting with a person or group, manage and delete meetings\n"
+        "\"send_email\" — draft and send an email\n"
+        "\"read_file\" — read a file or document\n"
+        "\"write_document\" — write a file or document\n\n"
+        "You have access to think tool, message history Supabase table, and Supabase vector store (message_vector).\n\n"
+        "🧠 You always take context into account. For example:\n"
+        "If conversation is talking about a meeting and subjects etc, you can deduct infos by yourself using message history.\n\n"
+        "✅ You must always return your output as a valid JSON object in the exact format below — with no commentary, explanation, or extra text.\n"
+        "{\n"
+        "  \"intent\": \"reply\" | \"meeting\" | \"send_email\" | \"read_file\" | \"write_document\"\n"
+        "}\n\n"
+        "Do not include any other keys. Do not return markdown, HTML, or any extra language.\n"
+        "You NEVER write a reply to the user, ever."
         ),
     }]
+
     _add(msgs, chat_mem)
     if semantic_mem:
         msgs.append({"role": "system", "content": "🔎 Relevant context:"})
