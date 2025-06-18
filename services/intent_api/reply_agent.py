@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import os
 import requests
+import json
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -195,20 +197,28 @@ def upsert_contact(
     return update_contact(existing["id"], **patch) if patch else existing
 
     # ── 3 reply ───────────
+def extract_json(text: str) -> dict:
+    """Extract the last JSON block in a text (if any)."""
+    try:
+        start = text.rfind("{")
+        return json.loads(text[start:]) if start != -1 else {}
+    except Exception:
+        return {}
+
+EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}")
+def contains_email(text: str) -> bool:
+    return bool(EMAIL_RE.search(text))
+
+
 def process_reply(
     chat_id: str,
     last_user_text: str,
     missing_info: str | None = None,
     custom_prompt: str | None = None,
 ) -> None:
-    """
-    Handle one user turn:
-        • Ask for missing e-mail / subject / body if needed
-        • Else, generate an intelligent reply and handle contact CRUD
-    """
     access_token, _ = get_access_token()
 
-    # ── 3.1 Ask explicitly for missing email / subject / body ───────────
+    # ── 1. Ask for missing info ────────────────────────────────────────
     if missing_info:
         ask = (
             custom_prompt
@@ -223,7 +233,7 @@ def process_reply(
         logging.info("✓ prompt for %s sent", missing_info)
         return
 
-    # ── 3.2 Gather memory context ───────────────────────────────────────
+    # ── 2. Context and memory ──────────────────────────────────────────
     chat_type = _graph(
         f"https://graph.microsoft.com/v1.0/chats/{chat_id}?$select=chatType",
         access_token,
@@ -242,16 +252,18 @@ def process_reply(
                 }
             )
 
-    # ── 3.3 Build prompt ────────────────────────────────────────────────
+    # ── 3. Build GPT prompt ────────────────────────────────────────────
     msgs: List[Dict[str, str]] = [
         {
             "role": "system",
             "content": (
-                "You are a professional AI assistant responsible for replying intelligently and conversationally to user messages.\n"
-                "You have access to a `contacts` table (Supabase).\n"
-                "If the user provides a new contact (name + email), say 'Got it, I'll remember that.'\n"
-                "If the user says to delete someone, confirm and say they're deleted.\n"
-                "Don't fabricate data.\n"
+                "You are an AI assistant who chats with users.\n"
+                "When someone new is mentioned (e.g. a person or email not in the contact list), include a final JSON block like:\n"
+                '{"action": "add_contact", "name": "John Smith", "email": "john@acme.com"}\n'
+                "If the user asks to remove someone, use:\n"
+                '{"action": "delete_contact", "email": "john@acme.com"}\n'
+                "Only include the JSON at the end of the reply.\n"
+                "Otherwise, just reply normally in human language."
             ),
         }
     ]
@@ -265,8 +277,8 @@ def process_reply(
         _add(msgs, global_mem)
     msgs.append({"role": "user", "content": last_user_text})
 
-    # ── 3.4 Call GPT to generate reply ───────────────────────────────────
-    reply = (
+    # ── 4. GPT chat call ────────────────────────────────────────────────
+    full_reply = (
         client.chat.completions.create(
             model="gpt-4o",
             messages=msgs,
@@ -275,26 +287,26 @@ def process_reply(
         .message.content.strip()
     )
 
-    # ── 3.5 Check for known contact triggers ─────────────────────────────
-    lowered = last_user_text.lower()
-    if "delete contact" in lowered or "remove contact" in lowered:
-        contact = get_contact(conversation_id=chat_id)
+    # ── 5. Extract JSON intent ──────────────────────────────────────────
+    parsed = extract_json(full_reply)
+    contact_action = parsed.get("action")
+    reply = full_reply.split("{")[0].strip()  # clean reply (without json)
+
+    if contact_action == "add_contact" and parsed.get("email"):
+        upsert_contact(
+            email=parsed["email"],
+            name=parsed.get("name"),
+            conversation_id=chat_id,
+        )
+        reply += f"\n✅ Contact {parsed.get('name') or parsed['email']} added."
+
+    elif contact_action == "delete_contact" and parsed.get("email"):
+        contact = get_contact(email=parsed["email"])
         if contact:
             delete_contact(contact["id"])
-            reply = f"🗑️ Contact {contact.get('name') or contact['email']} deleted."
-        else:
-            reply = "I couldn't find a contact for this conversation."
+            reply += f"\n🗑️ Contact {parsed['email']} deleted."
 
-    elif "@" in last_user_text and ("remember" in lowered or "add contact" in lowered):
-        # Very simple extraction (for demo); in real code, parse more cleanly
-        words = last_user_text.split()
-        email = next((w for w in words if "@" in w), None)
-        name = next((w for w in words if w != email and "@" not in w), None)
-        if email:
-            upsert_contact(email=email, name=name, conversation_id=chat_id)
-            reply = f"✅ Contact {name or email} saved."
-
-    # ── 3.6 Send back to Teams and save memory ──────────────────────────
+    # ── 6. Post reply and save ─────────────────────────────────────────
     status = _teams_post(chat_id, reply, access_token)
     save_message(chat_id, "assistant", reply, chat_type)
     logging.info("✓ reply sent (%s)", status)
