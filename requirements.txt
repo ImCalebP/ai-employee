@@ -7,4 +7,6 @@ openai>=1.88.0
 msal                # Microsoft auth library
 cryptography        # token-encryption helper
 supabase>=2.4           # ← ADD THIS LINE
-python-dotenv 
+python-dotenv
+python-docx         # For document generation
+flask               # For document generation service
