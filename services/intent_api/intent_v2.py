@@ -338,6 +338,20 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
     
     # 7️⃣ Execute action sequence
     results = []
+    
+    # If intent is unknown or no actions, default to reply
+    if analysis.primary_intent == Intent.UNKNOWN or not analysis.action_sequence:
+        process_reply(chat_id, text)
+        return {
+            "status": "ok",
+            "intent": "reply",
+            "urgency": analysis.urgency,
+            "tone": analysis.tone,
+            "confidence": analysis.confidence,
+            "actions_executed": [{"action": "reply", "result": "replied"}],
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+    
     for step in analysis.action_sequence:
         # Replace entity references with resolved values
         if step.requires_resolution:
