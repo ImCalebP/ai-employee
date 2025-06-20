@@ -55,6 +55,8 @@ class ParallelExecutor:
         return {
             "send_email": self._wrap_sync_handler(process_email_request),
             "reply": self._wrap_reply_handler(process_reply),
+            "generate_reply": self._wrap_reply_handler(process_reply),
+            "send_reply": self._wrap_reply_handler(process_reply),
             "generate_document": self._wrap_document_handler(process_document_request, "generate_from_text"),
             "share_document": self._wrap_document_handler(process_document_request, "share_document"),
             "create_task": self._wrap_task_handler(process_task_request, "create"),
