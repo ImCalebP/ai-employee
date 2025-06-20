@@ -18,6 +18,7 @@ from enum import Enum
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
+from common.supabase import supabase
 
 # ───────── Dependencies ─────────
 from common.graph_auth import get_access_token
