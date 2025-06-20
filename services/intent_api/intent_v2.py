@@ -399,8 +399,13 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
                 prompt = contact_prompt
         
         if prompt:
-            # Store the pending action sequence for later
-            # TODO: Store in database with a session ID
+            # Store the pending action sequence in the database
+            pending_action_record = {
+                "chat_id": chat_id,
+                "action_sequence": analysis.action_sequence,
+            }
+            supabase.table("pending_actions").insert(pending_action_record).execute()
+
             process_reply(chat_id, text, custom_prompt=prompt)
             return {
                 "status": "missing_info",
