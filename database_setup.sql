@@ -101,7 +101,18 @@ CREATE INDEX IF NOT EXISTS idx_documents_embedding ON documents USING ivfflat (e
 CREATE INDEX IF NOT EXISTS idx_tasks_embedding ON tasks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- 5. SEMANTIC SEARCH FUNCTIONS
+-- 5. PENDING ACTIONS TABLE
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS pending_actions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chat_id TEXT NOT NULL,
+    action_sequence JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- 6. SEMANTIC SEARCH FUNCTIONS
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 -- Document semantic search function (base version)
