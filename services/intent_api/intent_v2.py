@@ -403,7 +403,7 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
             # Store the pending action sequence in the database
             pending_action_record = {
                 "chat_id": chat_id,
-                "action_sequence": analysis.action_sequence,
+                "action_sequence": [step.dict() for step in analysis.action_sequence],
             }
             supabase.table("pending_actions").insert(pending_action_record).execute()
 
