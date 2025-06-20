@@ -66,6 +66,14 @@ class ParallelExecutor:
             "compile_conversation_summary": self._wrap_document_handler(process_document_request, "generate_from_text"),
             "proactive_analysis": self._handle_proactive_analysis,
             "context_enrichment": self._handle_context_enrichment,
+            # Contact-related actions
+            "add_contact": self._handle_add_contact,
+            "delete_contact": self._handle_delete_contact,
+            "search_contact_role": self._handle_search_contact_role,
+            "fetch_contact_info": self._handle_fetch_contact_info,
+            "search_contact_info": self._handle_search_contact_info,
+            "resolve_contact": self._handle_resolve_contact,
+            "fetch_meeting_summary": self._handle_fetch_meeting_summary,
         }
     
     def _wrap_sync_handler(self, handler):
@@ -132,6 +140,142 @@ class ParallelExecutor:
         )
         
         return {"status": "enriched", "context": context}
+    
+    async def _handle_add_contact(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle adding a new contact."""
+        from services.intent_api.reply_agent import upsert_contact
+        
+        loop = asyncio.get_event_loop()
+        contact = await loop.run_in_executor(
+            None,
+            upsert_contact,
+            email=params.get("email", ""),
+            name=params.get("name"),
+            conversation_id=self.chat_id,
+            phone=params.get("phone"),
+            role=params.get("role")
+        )
+        
+        return {"status": "success", "contact": contact}
+    
+    async def _handle_delete_contact(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle deleting a contact."""
+        from services.intent_api.reply_agent import get_contact, delete_contact
+        
+        loop = asyncio.get_event_loop()
+        contact = await loop.run_in_executor(None, get_contact, email=params.get("email", ""))
+        
+        if contact:
+            await loop.run_in_executor(None, delete_contact, contact["id"])
+            return {"status": "success", "deleted": contact["email"]}
+        else:
+            return {"status": "not_found"}
+    
+    async def _handle_search_contact_role(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle searching contacts by role."""
+        from common.unified_memory import search_contacts_by_role
+        from services.intent_api.reply_agent import process_reply
+        
+        role = params.get("role", "")
+        if not role:
+            return {"status": "failed", "error": "No role specified"}
+        
+        loop = asyncio.get_event_loop()
+        contacts = await loop.run_in_executor(None, search_contacts_by_role, role, 10)
+        
+        if contacts:
+            # Format the response
+            contact_list = []
+            for contact in contacts:
+                contact_info = f"{contact.get('name', 'Unknown')} ({contact.get('email', 'No email')})"
+                if contact.get('role'):
+                    contact_info += f" - {contact['role']}"
+                contact_list.append(contact_info)
+            
+            response_message = f"J'ai trouvé {len(contacts)} contact(s) avec le rôle '{role}':\n\n" + "\n".join(contact_list)
+            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            return {"status": "success", "contacts_found": len(contacts)}
+        else:
+            response_message = f"Je n'ai trouvé aucun contact avec le rôle '{role}'."
+            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            return {"status": "no_results"}
+    
+    async def _handle_fetch_contact_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle fetching contact information."""
+        from common.unified_memory import search_contacts, get_contact_by_email, search_contacts_by_role
+        from services.intent_api.reply_agent import process_reply
+        
+        role = params.get("role", "")
+        name = params.get("name", "")
+        email = params.get("email", "")
+        
+        loop = asyncio.get_event_loop()
+        contacts = []
+        
+        if email:
+            contact = await loop.run_in_executor(None, get_contact_by_email, email)
+            if contact:
+                contacts = [contact]
+        elif role:
+            contacts = await loop.run_in_executor(None, search_contacts_by_role, role, 5)
+        elif name:
+            contacts = await loop.run_in_executor(None, search_contacts, name, 5)
+        
+        if contacts:
+            # Format the response
+            contact_details = []
+            for contact in contacts:
+                details = [f"**{contact.get('name', 'Unknown')}**"]
+                if contact.get('email'):
+                    details.append(f"Email: {contact['email']}")
+                if contact.get('role'):
+                    details.append(f"Role: {contact['role']}")
+                if contact.get('phone'):
+                    details.append(f"Phone: {contact['phone']}")
+                contact_details.append("\n".join(details))
+            
+            response_message = f"Voici les informations de contact:\n\n" + "\n\n".join(contact_details)
+            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            return {"status": "success", "contacts_found": len(contacts)}
+        else:
+            search_criteria = role or name or email
+            response_message = f"Je n'ai trouvé aucun contact correspondant à '{search_criteria}'."
+            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            return {"status": "no_results"}
+    
+    async def _handle_search_contact_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle searching contact information (alias for fetch_contact_info)."""
+        return await self._handle_fetch_contact_info(params)
+    
+    async def _handle_resolve_contact(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle resolving a contact by name or email."""
+        from common.unified_memory import search_contacts, get_contact_by_email
+        
+        name = params.get("name", "")
+        email = params.get("email", "")
+        
+        loop = asyncio.get_event_loop()
+        contact = None
+        
+        if email:
+            contact = await loop.run_in_executor(None, get_contact_by_email, email)
+        elif name:
+            contacts = await loop.run_in_executor(None, search_contacts, name, 1)
+            if contacts:
+                contact = contacts[0]
+        
+        if contact:
+            return {"status": "success", "contact": contact}
+        else:
+            return {"status": "not_found", "query": name or email}
+    
+    async def _handle_fetch_meeting_summary(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle fetching meeting summary (placeholder for Fireflies integration)."""
+        # TODO: Integrate with Fireflies.ai API
+        return {
+            "status": "pending_integration",
+            "message": "Fireflies.ai integration pending"
+        }
     
     async def execute_action(self, action_id: str, action: str, params: Dict[str, Any]) -> ActionResult:
         """Execute a single action."""
