@@ -124,7 +124,7 @@ def analyze_intent_advanced(
 Your response must include:
 1. primary_intent: The main intent (reply, send_email, schedule_meeting, cancel_meeting, generate_document, share_document, create_task, update_task, generate_report, meeting_summary, proactive_followup, alert_human, search_info, unknown)
 2. action_sequence: List of actions needed to fulfill the intent, each with:
-   - action: specific action to take
+   - action: specific action to take. Must be one of: send_email, resolve_contact, reply, generate_document, share_document, fetch_meeting_summary, create_task, extract_tasks, update_task, compile_conversation_summary, generate_reply, send_reply, send_message, add_contact, delete_contact, search_contact_role, fetch_contact_info, search_contact_info, search_contact
    - params: parameters for the action
    - requires_resolution: list of entities that need to be resolved (e.g., ["contact:Marc", "document:meeting_summary"])
 3. urgency: low, medium, high, or critical
