@@ -39,6 +39,10 @@ from common.memory_helpers import (
     fetch_global_history,
     semantic_search,
 )
+from common.enhanced_memory import (
+    get_contextual_intelligence,
+    analyze_message_for_proactive_actions,
+)
 from common.supabase import supabase  # configured client
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -233,15 +237,32 @@ def process_reply(
         logging.info("✓ prompt for %s sent", missing_info)
         return
 
-    # ── 2. Context and memory ──────────────────────────────────────────
+    # ── 2. Enhanced context and memory ──────────────────────────────────────────
     chat_type = _graph(
         f"https://graph.microsoft.com/v1.0/chats/{chat_id}?$select=chatType",
         access_token,
     ).get("chatType", "unknown")
 
+    # Traditional memory
     chat_mem = fetch_chat_history(chat_id, 40)
     global_mem = fetch_global_history(8)
     semantic_mem = semantic_search(last_user_text, chat_id, 8, 4)
+    
+    # Enhanced contextual intelligence
+    contextual_intel = get_contextual_intelligence(
+        last_user_text, 
+        chat_id,
+        include_documents=True,
+        include_tasks=True,
+        include_messages=True
+    )
+    
+    # Proactive analysis
+    proactive_analysis = analyze_message_for_proactive_actions(
+        last_user_text,
+        chat_id,
+        "user"  # sender
+    )
 
     def _add(dst: List[Dict[str, str]], rows):
         for r in rows:
@@ -252,20 +273,41 @@ def process_reply(
                 }
             )
 
-    # ── 3. Build GPT prompt ────────────────────────────────────────────
+    # ── 3. Build enhanced GPT prompt ────────────────────────────────────────────
+    system_prompt = (
+        "You are an intelligent AI assistant with access to organizational knowledge.\n"
+        "When someone new is mentioned (e.g. a person or email not in the contact list), include a final JSON block like:\n"
+        '{"action": "add_contact", "name": "John Smith", "email": "john@acme.com"}\n'
+        "If the user asks to remove someone, use:\n"
+        '{"action": "delete_contact", "email": "john@acme.com"}\n'
+        "Only include the JSON at the end of the reply.\n"
+        "Otherwise, just reply normally in human language.\n\n"
+    )
+    
+    # Add contextual intelligence to system prompt
+    if contextual_intel.get("summary"):
+        system_prompt += f"📋 Context Summary: {contextual_intel['summary']}\n"
+    
+    # Add document context
+    if contextual_intel.get("documents"):
+        system_prompt += "\n📄 Relevant Documents:\n"
+        for doc in contextual_intel["documents"][:2]:
+            system_prompt += f"- {doc.get('title', 'Untitled')}: {doc.get('content', '')[:100]}...\n"
+    
+    # Add task context
+    if contextual_intel.get("tasks"):
+        system_prompt += "\n✅ Related Tasks:\n"
+        for task in contextual_intel["tasks"][:2]:
+            system_prompt += f"- {task.get('description', 'No description')[:100]}...\n"
+    
+    # Add proactive suggestions
+    if proactive_analysis.get("context_alerts"):
+        system_prompt += "\n🔔 Context Alerts:\n"
+        for alert in proactive_analysis["context_alerts"]:
+            system_prompt += f"- {alert}\n"
+    
     msgs: List[Dict[str, str]] = [
-        {
-            "role": "system",
-            "content": (
-                "You are an AI assistant who chats with users.\n"
-                "When someone new is mentioned (e.g. a person or email not in the contact list), include a final JSON block like:\n"
-                '{"action": "add_contact", "name": "John Smith", "email": "john@acme.com"}\n'
-                "If the user asks to remove someone, use:\n"
-                '{"action": "delete_contact", "email": "john@acme.com"}\n'
-                "Only include the JSON at the end of the reply.\n"
-                "Otherwise, just reply normally in human language."
-            ),
-        }
+        {"role": "system", "content": system_prompt}
     ]
 
     _add(msgs, chat_mem)

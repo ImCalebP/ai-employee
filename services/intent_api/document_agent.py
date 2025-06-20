@@ -20,6 +20,7 @@ from openai import OpenAI
 from common.graph_auth import get_access_token
 from common.memory_helpers import save_message
 from common.supabase import supabase
+from common.enhanced_memory import save_document_with_embedding
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.getLogger(__name__).setLevel(logging.INFO)
@@ -85,23 +86,16 @@ def generate_document_from_text(
         else:
             title = f"{doc_type.capitalize()} - {datetime.utcnow().strftime('%Y-%m-%d')}"
         
-        # Store document metadata in database
-        doc_record = {
-            "id": doc_id,
-            "title": title,
-            "type": doc_type,
-            "content": text[:1000],  # Store first 1000 chars for search
-            "file_path": temp_path,
-            "created_at": datetime.utcnow().isoformat(),
-            "metadata": metadata or {}
-        }
+        # Save document with semantic embedding using enhanced memory
+        doc_record = save_document_with_embedding(
+            title=title,
+            content=text,
+            doc_type=doc_type,
+            file_path=temp_path,
+            metadata=metadata
+        )
         
-        # Insert into documents table
-        resp = supabase.table("documents").insert(doc_record).execute()
-        if getattr(resp, "error", None):
-            raise RuntimeError(f"Failed to save document metadata: {resp.error}")
-        
-        logging.info(f"✓ Document generated: {title} ({doc_id})")
+        logging.info(f"✓ Document generated with embedding: {title}")
         return doc_record
         
     except Exception as e:

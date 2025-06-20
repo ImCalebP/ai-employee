@@ -19,6 +19,7 @@ from common.graph_auth import get_access_token
 from common.memory_helpers import save_message
 from common.supabase import supabase
 from common.unified_memory import search_contacts
+from common.enhanced_memory import save_task_with_embedding
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.getLogger(__name__).setLevel(logging.INFO)
@@ -149,26 +150,20 @@ def create_task(
     # Parse due date
     due_datetime = parse_due_date(due_date) if due_date else None
     
-    task_record = {
-        "description": description,
-        "assignee": assignee_email or assignee,
-        "due_date": due_datetime.isoformat() if due_datetime else None,
-        "priority": priority,
-        "status": "pending",
-        "chat_id": chat_id,
-        "project_id": project_id,
-        "created_at": datetime.utcnow().isoformat(),
-        "metadata": metadata or {}
-    }
+    # Use enhanced memory system to save task with embedding
+    task = save_task_with_embedding(
+        description=description,
+        assignee=assignee,
+        assignee_email=assignee_email,
+        due_date=due_datetime.isoformat() if due_datetime else None,
+        priority=priority,
+        status="pending",
+        chat_id=chat_id,
+        project_id=project_id,
+        metadata=metadata
+    )
     
-    # Insert into tasks table
-    resp = supabase.table("tasks").insert(task_record).execute()
-    if getattr(resp, "error", None):
-        raise RuntimeError(f"Failed to create task: {resp.error}")
-    
-    task = resp.data[0]
-    logging.info(f"✓ Task created: {task['id']} - {description[:50]}...")
-    
+    logging.info(f"✓ Task created with embedding: {task['id']} - {description[:50]}...")
     return task
 
 

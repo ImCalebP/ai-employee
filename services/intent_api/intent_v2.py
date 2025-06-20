@@ -33,10 +33,16 @@ from common.unified_memory import (
     search_documents,
     search_tasks,
 )
+from common.enhanced_memory import (
+    get_contextual_intelligence,
+    analyze_message_for_proactive_actions,
+    find_relevant_documents_for_message,
+)
 from services.intent_api.email_agent import process_email_request
 from services.intent_api.reply_agent import process_reply
 from services.intent_api.document_agent import process_document_request
 from services.intent_api.task_agent import process_task_request
+from services.intent_api.parallel_executor import execute_actions_parallel, create_action
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI(title="AI-Employee • Enhanced Intent System v2")
@@ -336,7 +342,7 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
                 "unresolved": unresolved_entities,
             }
     
-    # 7️⃣ Execute action sequence
+    # 7️⃣ Execute action sequence with parallel execution
     results = []
     
     # If intent is unknown or no actions, default to reply
@@ -352,6 +358,52 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
             "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
         }
     
+    # Check if we can use parallel execution (multiple independent actions)
+    if len(analysis.action_sequence) > 1:
+        # Convert action sequence to parallel execution format
+        parallel_actions = []
+        for i, step in enumerate(analysis.action_sequence):
+            # Replace entity references with resolved values
+            if step.requires_resolution:
+                for entity_ref in step.requires_resolution:
+                    if entity_ref in resolved_entities:
+                        # Replace placeholder with resolved value
+                        step.params = json.loads(
+                            json.dumps(step.params).replace(
+                                f"{{{{resolved:{entity_ref}}}}}",
+                                json.dumps(resolved_entities[entity_ref])
+                            )
+                        )
+            
+            parallel_actions.append(create_action(
+                action=step.action,
+                params=step.params,
+                action_id=f"action_{i}",
+                depends_on=step.requires_resolution if step.requires_resolution else None
+            ))
+        
+        # Execute actions in parallel
+        import asyncio
+        parallel_results = asyncio.run(execute_actions_parallel(chat_id, parallel_actions))
+        
+        return {
+            "status": "ok",
+            "intent": analysis.primary_intent,
+            "urgency": analysis.urgency,
+            "tone": analysis.tone,
+            "confidence": analysis.confidence,
+            "actions_executed": parallel_results["results"],
+            "execution_summary": {
+                "total_actions": parallel_results["total_actions"],
+                "completed": parallel_results["completed"],
+                "failed": parallel_results["failed"],
+                "success_rate": parallel_results["success_rate"],
+                "total_duration": parallel_results["total_duration"]
+            },
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
+        }
+    
+    # Single action - execute sequentially
     for step in analysis.action_sequence:
         # Replace entity references with resolved values
         if step.requires_resolution:
@@ -429,6 +481,21 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
                 chat_id,
                 "update",
                 step.params
+            )
+            results.append({"action": step.action, "result": result})
+        
+        elif step.action == "compile_conversation_summary":
+            # Generate a conversation summary document
+            conversation_context = step.params.get("conversation_context", [])
+            summary_text = "\n".join(conversation_context)
+            
+            result = process_document_request(
+                chat_id,
+                "generate_from_text",
+                {
+                    "text": f"Conversation Summary:\n\n{summary_text}",
+                    "type": "conversation_summary"
+                }
             )
             results.append({"action": step.action, "result": result})
         
