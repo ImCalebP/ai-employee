@@ -309,6 +309,133 @@ def get_document_context_for_conversation(chat_id: str) -> List[Dict[str, Any]]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Contact Intelligence
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def search_contacts_by_name(name: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Search contacts by name with fuzzy matching."""
+    
+    # Search in contacts table
+    resp = supabase.table("contacts").select("*").ilike("name", f"%{name}%").limit(limit).execute()
+    contacts = resp.data or []
+    
+    # Also search by email if name contains @ symbol
+    if "@" in name:
+        email_resp = supabase.table("contacts").select("*").ilike("email", f"%{name}%").limit(limit).execute()
+        contacts.extend(email_resp.data or [])
+    
+    # Remove duplicates
+    seen_ids = set()
+    unique_contacts = []
+    for contact in contacts:
+        if contact["id"] not in seen_ids:
+            seen_ids.add(contact["id"])
+            unique_contacts.append(contact)
+    
+    return unique_contacts
+
+
+def get_contact_conversations(contact_email: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Get recent conversations involving a specific contact."""
+    
+    # Search message history for messages from this contact
+    resp = supabase.table("message_history").select("*").eq("sender", contact_email).order("timestamp", desc=True).limit(limit).execute()
+    return resp.data or []
+
+
+def extract_contact_names_from_text(text: str) -> List[str]:
+    """Extract potential contact names from text using common patterns."""
+    import re
+    
+    # Common patterns for names in conversation
+    patterns = [
+        r'\b([A-Z][a-z]+)\s+([A-Z][a-z]+)\b',  # First Last
+        r'\b([A-Z][a-z]+)\b(?=\s+(?:said|told|mentioned|asked|replied|wrote|emailed))',  # Name before action verbs
+        r'(?:from|to|with|about)\s+([A-Z][a-z]+)\b',  # Preposition + Name
+        r'(?:email|call|message|contact)\s+([A-Z][a-z]+)\b',  # Action + Name
+        r'\b([A-Z][a-z]+)(?:\'s|s)\s+(?:email|phone|number)',  # Possessive + contact info
+    ]
+    
+    potential_names = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text)
+        for match in matches:
+            if isinstance(match, tuple):
+                # Full name match
+                potential_names.append(" ".join(match))
+            else:
+                # Single name match
+                potential_names.append(match)
+    
+    # Filter out common words that aren't names
+    common_words = {"The", "This", "That", "What", "When", "Where", "How", "Why", "Can", "Will", "Should", "Would", "Could"}
+    return [name for name in potential_names if name not in common_words]
+
+
+def analyze_contact_context(
+    message: str,
+    chat_id: str
+) -> Dict[str, Any]:
+    """Analyze message for contact-related context and information needs."""
+    
+    context = {
+        "mentioned_contacts": [],
+        "contact_queries": [],
+        "conversation_history": [],
+        "suggested_actions": []
+    }
+    
+    # Extract potential contact names
+    potential_names = extract_contact_names_from_text(message)
+    
+    # Search for each potential contact
+    for name in potential_names:
+        contacts = search_contacts_by_name(name, limit=3)
+        if contacts:
+            for contact in contacts:
+                context["mentioned_contacts"].append({
+                    "name": contact["name"],
+                    "email": contact["email"],
+                    "phone": contact.get("phone"),
+                    "role": contact.get("role"),
+                    "confidence": 0.8  # High confidence for exact matches
+                })
+                
+                # Get conversation history with this contact
+                conversations = get_contact_conversations(contact["email"], limit=5)
+                if conversations:
+                    context["conversation_history"].extend(conversations)
+    
+    # Detect contact information queries
+    query_patterns = [
+        (r"what.+(?:email|address).+([A-Z][a-z]+)", "email"),
+        (r"([A-Z][a-z]+).+(?:email|address)", "email"),
+        (r"what.+(?:phone|number).+([A-Z][a-z]+)", "phone"),
+        (r"([A-Z][a-z]+).+(?:phone|number)", "phone"),
+        (r"how to contact ([A-Z][a-z]+)", "contact_info"),
+        (r"([A-Z][a-z]+).+contact", "contact_info"),
+    ]
+    
+    for pattern, info_type in query_patterns:
+        matches = re.findall(pattern, message, re.IGNORECASE)
+        for match in matches:
+            context["contact_queries"].append({
+                "name": match,
+                "info_type": info_type,
+                "query": message
+            })
+    
+    # Generate suggested actions
+    if context["contact_queries"]:
+        context["suggested_actions"].append("retrieve_contact_info")
+    
+    if context["mentioned_contacts"]:
+        context["suggested_actions"].append("provide_contact_context")
+    
+    return context
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Proactive Intelligence
 # ═══════════════════════════════════════════════════════════════════════════════
 

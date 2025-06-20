@@ -42,6 +42,7 @@ from common.memory_helpers import (
 from common.enhanced_memory import (
     get_contextual_intelligence,
     analyze_message_for_proactive_actions,
+    analyze_contact_context,
 )
 from common.supabase import supabase  # configured client
 
@@ -263,6 +264,9 @@ def process_reply(
         chat_id,
         "user"  # sender
     )
+    
+    # Contact intelligence analysis
+    contact_context = analyze_contact_context(last_user_text, chat_id)
 
     def _add(dst: List[Dict[str, str]], rows):
         for r in rows:
@@ -305,6 +309,30 @@ def process_reply(
         system_prompt += "\n🔔 Context Alerts:\n"
         for alert in proactive_analysis["context_alerts"]:
             system_prompt += f"- {alert}\n"
+    
+    # Add contact intelligence
+    if contact_context.get("mentioned_contacts"):
+        system_prompt += "\n👥 Known Contacts:\n"
+        for contact in contact_context["mentioned_contacts"][:3]:
+            contact_info = f"- {contact['name']}"
+            if contact.get('email'):
+                contact_info += f" ({contact['email']})"
+            if contact.get('role'):
+                contact_info += f" - {contact['role']}"
+            if contact.get('phone'):
+                contact_info += f" - {contact['phone']}"
+            system_prompt += contact_info + "\n"
+    
+    # Add contact queries handling
+    if contact_context.get("contact_queries"):
+        system_prompt += "\n📞 Contact Information Requests:\n"
+        for query in contact_context["contact_queries"]:
+            system_prompt += f"- User asking for {query['info_type']} of {query['name']}\n"
+        system_prompt += "Provide the requested contact information from the known contacts above.\n"
+    
+    # Add conversation history with contacts
+    if contact_context.get("conversation_history"):
+        system_prompt += f"\n💬 Recent conversations with mentioned contacts ({len(contact_context['conversation_history'])} messages)\n"
     
     msgs: List[Dict[str, str]] = [
         {"role": "system", "content": system_prompt}
