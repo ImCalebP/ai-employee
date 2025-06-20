@@ -40,6 +40,7 @@ from common.enhanced_memory import (
     find_relevant_documents_for_message,
 )
 from common.contact_intelligence import create_or_update_contact, get_contact_by_identifier
+from common.contact_learning import ContactLearningSystem, PendingContact
 from services.intent_api.email_agent import process_email_request
 from services.intent_api.reply_agent import process_reply
 from services.intent_api.document_agent import process_document_request
@@ -52,19 +53,35 @@ logging.basicConfig(level=logging.INFO)
 
 
 class Intent(str, Enum):
+    # Communication
     REPLY = "reply"
     SEND_EMAIL = "send_email"
+    
+    # Meetings
     SCHEDULE_MEETING = "schedule_meeting"
     CANCEL_MEETING = "cancel_meeting"
+    MEETING_SUMMARY = "meeting_summary"
+    
+    # Documents
     GENERATE_DOCUMENT = "generate_document"
     SHARE_DOCUMENT = "share_document"
+    GENERATE_REPORT = "generate_report"
+    
+    # Tasks
     CREATE_TASK = "create_task"
     UPDATE_TASK = "update_task"
-    GENERATE_REPORT = "generate_report"
-    MEETING_SUMMARY = "meeting_summary"
+    
+    # Contacts - Complete coverage
+    SEARCH_CONTACT = "search_contact"
+    SEARCH_INFO = "search_info"
+    MANAGE_CONTACT = "manage_contact"
+    ADD_CONTACT = "add_contact"
+    UPDATE_CONTACT = "update_contact"
+    FETCH_CONTACT_INFO = "fetch_contact_info"
+    
+    # System
     PROACTIVE_FOLLOWUP = "proactive_followup"
     ALERT_HUMAN = "alert_human"
-    
     UNKNOWN = "unknown"
 
 
@@ -329,6 +346,31 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
     global_history = fetch_global_history(8)
     semantic_context = semantic_search(text, chat_id, 8, 4)
     
+    # 3.5️⃣ Contact Learning - Detect and process person mentions
+    try:
+        person_mentions = ContactLearningSystem.detect_person_mentions(text, chat_history)
+        if person_mentions:
+            pending_contacts = ContactLearningSystem.process_contact_mentions(
+                person_mentions, chat_id, msg_id
+            )
+            
+            # Check if we have pending contacts that need information
+            all_pending = ContactLearningSystem.get_pending_contacts(chat_id)
+            
+            # Try to extract additional info from current conversation
+            for pending in all_pending:
+                extracted_info = ContactLearningSystem.extract_contact_info_from_conversation(
+                    text, chat_history, pending.name
+                )
+                if extracted_info:
+                    ContactLearningSystem.update_pending_contact(
+                        pending.name, chat_id, extracted_info
+                    )
+            
+            logging.info(f"Contact learning: {len(person_mentions)} mentions, {len(pending_contacts)} new pending")
+    except Exception as e:
+        logging.error(f"Error in contact learning: {e}")
+    
     # 4️⃣ Advanced intent analysis
     analysis = analyze_intent_advanced(text, chat_history, global_history, semantic_context)
     
@@ -340,10 +382,19 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
         analysis.action_sequence
     )
     
-    # 6️⃣ Check for missing info or unresolved entities
-    if analysis.missing_info or unresolved_entities:
+    # 6️⃣ Check for missing info, unresolved entities, or pending contacts
+    pending_contacts = ContactLearningSystem.get_pending_contacts(chat_id)
+    
+    if analysis.missing_info or unresolved_entities or pending_contacts:
         # Generate prompt for missing info
         prompt = generate_missing_info_prompt(analysis.missing_info, unresolved_entities)
+        
+        # Add proactive contact information gathering
+        if pending_contacts and not prompt:
+            contact_prompt = ContactLearningSystem.generate_info_gathering_prompt(pending_contacts)
+            if contact_prompt:
+                prompt = contact_prompt
+        
         if prompt:
             # Store the pending action sequence for later
             # TODO: Store in database with a session ID
@@ -353,6 +404,7 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
                 "intent": analysis.primary_intent,
                 "missing": analysis.missing_info,
                 "unresolved": unresolved_entities,
+                "pending_contacts": len(pending_contacts),
             }
     
     # 7️⃣ Execute action sequence with parallel execution

@@ -44,7 +44,13 @@ def search_contacts_smart(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         return contacts
     except Exception as e:
         logging.error(f"Error searching contacts: {e}")
-        return []
+        # Fallback to basic search if enhanced function doesn't exist
+        try:
+            from common.unified_memory import search_contacts
+            return search_contacts(query, limit)
+        except Exception as fallback_error:
+            logging.error(f"Fallback search also failed: {fallback_error}")
+            return []
 
 
 def get_contact_by_identifier(identifier: str) -> Optional[Dict[str, Any]]:
