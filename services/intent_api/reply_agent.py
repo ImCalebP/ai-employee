@@ -280,6 +280,8 @@ def process_reply(
     # ── 3. Build enhanced GPT prompt ────────────────────────────────────────────
     system_prompt = (
         "You are an intelligent AI assistant with access to organizational knowledge.\n"
+        "IMPORTANT: When contacts are mentioned or when someone asks about contact information, "
+        "proactively provide their details from the known contacts list below.\n"
         "When someone new is mentioned (e.g. a person or email not in the contact list), include a final JSON block like:\n"
         '{"action": "add_contact", "name": "John Smith", "email": "john@acme.com"}\n'
         "If the user asks to remove someone, use:\n"
@@ -328,11 +330,14 @@ def process_reply(
         system_prompt += "\n📞 Contact Information Requests:\n"
         for query in contact_context["contact_queries"]:
             system_prompt += f"- User asking for {query['info_type']} of {query['name']}\n"
-        system_prompt += "Provide the requested contact information from the known contacts above.\n"
+        system_prompt += "IMPORTANT: Provide the requested contact information from the known contacts above. If the contact is not found, say so clearly.\n"
     
     # Add conversation history with contacts
     if contact_context.get("conversation_history"):
         system_prompt += f"\n💬 Recent conversations with mentioned contacts ({len(contact_context['conversation_history'])} messages)\n"
+        # Add a few recent messages for context
+        for msg in contact_context["conversation_history"][:3]:
+            system_prompt += f"- {msg.get('sender', 'Unknown')}: {msg.get('content', '')[:100]}...\n"
     
     msgs: List[Dict[str, str]] = [
         {"role": "system", "content": system_prompt}

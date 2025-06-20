@@ -304,7 +304,7 @@ def get_document_context_for_conversation(chat_id: str) -> List[Dict[str, Any]]:
         document_id,
         relevance_score,
         documents!inner(title, type, content)
-    """).eq("chat_id", chat_id).order("relevance_score", desc=True).limit(5).execute()
+    """).eq("chat_id", chat_id).order("relevance_score.desc").limit(5).execute()
     
     return resp.data or []
 
@@ -340,13 +340,12 @@ def get_contact_conversations(contact_email: str, limit: int = 10) -> List[Dict[
     """Get recent conversations involving a specific contact."""
     
     # Search message history for messages from this contact
-    resp = supabase.table("message_history").select("*").eq("sender", contact_email).order("timestamp", desc=True).limit(limit).execute()
+    resp = supabase.table("message_history").select("*").eq("sender", contact_email).order("timestamp.desc").limit(limit).execute()
     return resp.data or []
 
 
 def extract_contact_names_from_text(text: str) -> List[str]:
     """Extract potential contact names from text using common patterns."""
-    import re
     
     # Common patterns for names in conversation
     patterns = [
@@ -355,22 +354,48 @@ def extract_contact_names_from_text(text: str) -> List[str]:
         r'(?:from|to|with|about)\s+([A-Z][a-z]+)\b',  # Preposition + Name
         r'(?:email|call|message|contact)\s+([A-Z][a-z]+)\b',  # Action + Name
         r'\b([A-Z][a-z]+)(?:\'s|s)\s+(?:email|phone|number)',  # Possessive + contact info
+        r'(?:what|whats|what\'s)\s+([A-Z][a-z]+)(?:\'s|s)?\s+(?:email|phone|number)',  # What's X's email
+        r'([A-Z][a-z]+)\s+email',  # Name email
+        r'email\s+(?:of|for)\s+([A-Z][a-z]+)',  # email of/for Name
     ]
     
     potential_names = []
     for pattern in patterns:
-        matches = re.findall(pattern, text)
+        matches = re.findall(pattern, text, re.IGNORECASE)
         for match in matches:
             if isinstance(match, tuple):
                 # Full name match
-                potential_names.append(" ".join(match))
+                name = " ".join(match).strip()
+                if name:
+                    potential_names.append(name)
             else:
                 # Single name match
-                potential_names.append(match)
+                if match and match.strip():
+                    potential_names.append(match.strip())
+    
+    # Also check for names in simple queries like "Max email?" or "Roger's email?"
+    simple_patterns = [
+        r'^([A-Z][a-z]+)\s+email\??$',  # Max email?
+        r'^([A-Z][a-z]+)(?:\'s|s)\s+email\??$',  # Max's email?
+    ]
+    
+    for pattern in simple_patterns:
+        matches = re.findall(pattern, text.strip(), re.IGNORECASE)
+        potential_names.extend(matches)
     
     # Filter out common words that aren't names
-    common_words = {"The", "This", "That", "What", "When", "Where", "How", "Why", "Can", "Will", "Should", "Would", "Could"}
-    return [name for name in potential_names if name not in common_words]
+    common_words = {"The", "This", "That", "What", "When", "Where", "How", "Why", "Can", "Will", "Should", "Would", "Could", "Whats"}
+    
+    # Remove duplicates and filter
+    unique_names = []
+    seen = set()
+    for name in potential_names:
+        name_lower = name.lower()
+        if name_lower not in seen and name not in common_words:
+            seen.add(name_lower)
+            unique_names.append(name)
+    
+    return unique_names
 
 
 def analyze_contact_context(
@@ -415,6 +440,9 @@ def analyze_contact_context(
         (r"([A-Z][a-z]+).+(?:phone|number)", "phone"),
         (r"how to contact ([A-Z][a-z]+)", "contact_info"),
         (r"([A-Z][a-z]+).+contact", "contact_info"),
+        (r"^([A-Z][a-z]+)\s+email\??$", "email"),  # Simple "Max email?"
+        (r"^([A-Z][a-z]+)(?:\'s|s)\s+email\??$", "email"),  # "Max's email?"
+        (r"email\s+(?:of|for)\s+([A-Z][a-z]+)", "email"),  # "email of Max"
     ]
     
     for pattern, info_type in query_patterns:

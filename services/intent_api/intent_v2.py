@@ -510,6 +510,36 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
                 process_reply(chat_id, text)
             results.append({"action": step.action, "result": "replied"})
         
+        elif step.action == "add_contact":
+            # Handle contact creation
+            from services.intent_api.reply_agent import upsert_contact
+            try:
+                contact = upsert_contact(
+                    email=step.params.get("email", ""),
+                    name=step.params.get("name"),
+                    conversation_id=chat_id,
+                    phone=step.params.get("phone"),
+                    role=step.params.get("role")
+                )
+                results.append({"action": step.action, "result": {"status": "success", "contact": contact}})
+            except Exception as e:
+                logging.error(f"Failed to add contact: {e}")
+                results.append({"action": step.action, "result": {"status": "failed", "error": str(e)}})
+        
+        elif step.action == "delete_contact":
+            # Handle contact deletion
+            from services.intent_api.reply_agent import get_contact, delete_contact
+            try:
+                contact = get_contact(email=step.params.get("email", ""))
+                if contact:
+                    delete_contact(contact["id"])
+                    results.append({"action": step.action, "result": {"status": "success", "deleted": contact["email"]}})
+                else:
+                    results.append({"action": step.action, "result": {"status": "not_found"}})
+            except Exception as e:
+                logging.error(f"Failed to delete contact: {e}")
+                results.append({"action": step.action, "result": {"status": "failed", "error": str(e)}})
+        
         else:
             logging.warning(f"Unhandled action: {step.action}")
             results.append({"action": step.action, "result": "not_implemented"})
