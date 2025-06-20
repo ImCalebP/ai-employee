@@ -451,8 +451,7 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
             ))
         
         # Execute actions in parallel
-        import asyncio
-        parallel_results = asyncio.run(execute_actions_parallel(chat_id, parallel_actions))
+        parallel_results = await execute_actions_parallel(chat_id, parallel_actions)
         
         return {
             "status": "ok",
