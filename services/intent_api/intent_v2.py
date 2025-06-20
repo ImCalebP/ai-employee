@@ -664,7 +664,46 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
                 search_criteria = role or name or email
                 process_reply(chat_id, text, custom_prompt=f"Je n'ai trouvé aucun contact correspondant à '{search_criteria}'.")
                 results.append({"action": step.action, "result": {"status": "no_results"}})
-        
+
+        elif step.action == "search_contact":
+            # Search for a contact by name, email, or role
+            role = step.params.get("role", "")
+            name = step.params.get("name", "")
+            email = step.params.get("email", "")
+
+            contacts = []
+            if email:
+                contact = get_contact_by_email(email)
+                if contact:
+                    contacts = [contact]
+            elif role:
+                contacts = search_contacts_by_role(role, limit=5)
+            elif name:
+                contacts = search_contacts(name, limit=5)
+
+            if contacts:
+                # Format the response with detailed contact information
+                contact_details = []
+                for contact in contacts:
+                    details = [f"**{contact.get('name', 'Unknown')}**"]
+                    if contact.get('email'):
+                        details.append(f"Email: {contact['email']}")
+                    if contact.get('role'):
+                        details.append(f"Role: {contact['role']}")
+                    if contact.get('phone'):
+                        details.append(f"Phone: {contact['phone']}")
+                    contact_details.append("\n".join(details))
+
+                # Send a reply with the contact information
+                response_message = f"Voici les informations de contact:\n\n" + "\n\n".join(contact_details)
+                process_reply(chat_id, text, custom_prompt=response_message)
+                results.append({"action": step.action, "result": {"status": "success", "contacts_found": len(contacts)}})
+            else:
+                # No contacts found
+                search_criteria = role or name or email
+                process_reply(chat_id, text, custom_prompt=f"Je n'ai trouvé aucun contact correspondant à '{search_criteria}'.")
+                results.append({"action": step.action, "result": {"status": "no_results"}})
+
         else:
             logging.warning(f"Unhandled action: {step.action}")
             results.append({"action": step.action, "result": "not_implemented"})
