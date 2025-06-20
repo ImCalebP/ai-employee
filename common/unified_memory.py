@@ -44,6 +44,19 @@ def get_contact_by_email(email: str) -> Optional[Dict[str, Any]]:
     )
     return (resp.data or [None])[0]
 
+def search_contacts_by_role(role: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Search contacts by role (case-insensitive, partial match).
+    """
+    resp = (
+        supabase.table("contacts")
+        .select("*")
+        .ilike("role", f"%{role}%")
+        .limit(limit)
+        .execute()
+    )
+    return resp.data or []
+
 # --- Documents ---
 def search_documents(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """

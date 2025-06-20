@@ -30,6 +30,7 @@ from common.memory_helpers import (
 from common.unified_memory import (
     search_contacts,
     get_contact_by_email,
+    search_contacts_by_role,
     search_documents,
     search_tasks,
 )
@@ -539,6 +540,70 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
             except Exception as e:
                 logging.error(f"Failed to delete contact: {e}")
                 results.append({"action": step.action, "result": {"status": "failed", "error": str(e)}})
+        
+        elif step.action == "search_contact_role":
+            # Search contacts by role
+            role = step.params.get("role", "")
+            if role:
+                contacts = search_contacts_by_role(role, limit=10)
+                if contacts:
+                    # Format the response with contact details
+                    contact_list = []
+                    for contact in contacts:
+                        contact_info = f"{contact.get('name', 'Unknown')} ({contact.get('email', 'No email')})"
+                        if contact.get('role'):
+                            contact_info += f" - {contact['role']}"
+                        contact_list.append(contact_info)
+                    
+                    # Send a reply with the found contacts
+                    response_message = f"J'ai trouvé {len(contacts)} contact(s) avec le rôle '{role}':\n\n" + "\n".join(contact_list)
+                    process_reply(chat_id, text, custom_prompt=response_message)
+                    results.append({"action": step.action, "result": {"status": "success", "contacts_found": len(contacts)}})
+                else:
+                    # No contacts found
+                    process_reply(chat_id, text, custom_prompt=f"Je n'ai trouvé aucun contact avec le rôle '{role}'.")
+                    results.append({"action": step.action, "result": {"status": "no_results"}})
+            else:
+                results.append({"action": step.action, "result": {"status": "failed", "error": "No role specified"}})
+        
+        elif step.action == "fetch_contact_info":
+            # Fetch contact information by role or other criteria
+            role = step.params.get("role", "")
+            name = step.params.get("name", "")
+            email = step.params.get("email", "")
+            
+            contacts = []
+            if email:
+                contact = get_contact_by_email(email)
+                if contact:
+                    contacts = [contact]
+            elif role:
+                contacts = search_contacts_by_role(role, limit=5)
+            elif name:
+                contacts = search_contacts(name, limit=5)
+            
+            if contacts:
+                # Format the response with detailed contact information
+                contact_details = []
+                for contact in contacts:
+                    details = [f"**{contact.get('name', 'Unknown')}**"]
+                    if contact.get('email'):
+                        details.append(f"Email: {contact['email']}")
+                    if contact.get('role'):
+                        details.append(f"Role: {contact['role']}")
+                    if contact.get('phone'):
+                        details.append(f"Phone: {contact['phone']}")
+                    contact_details.append("\n".join(details))
+                
+                # Send a reply with the contact information
+                response_message = f"Voici les informations de contact:\n\n" + "\n\n".join(contact_details)
+                process_reply(chat_id, text, custom_prompt=response_message)
+                results.append({"action": step.action, "result": {"status": "success", "contacts_found": len(contacts)}})
+            else:
+                # No contacts found
+                search_criteria = role or name or email
+                process_reply(chat_id, text, custom_prompt=f"Je n'ai trouvé aucun contact correspondant à '{search_criteria}'.")
+                results.append({"action": step.action, "result": {"status": "no_results"}})
         
         else:
             logging.warning(f"Unhandled action: {step.action}")
