@@ -499,6 +499,17 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
             )
             results.append({"action": step.action, "result": result})
         
+        elif step.action in ["generate_reply", "send_reply"]:
+            # Handle reply actions - use the reply agent
+            message = step.params.get("message", "")
+            if message:
+                # Use custom message from the action
+                process_reply(chat_id, text, custom_prompt=message)
+            else:
+                # Use standard reply
+                process_reply(chat_id, text)
+            results.append({"action": step.action, "result": "replied"})
+        
         else:
             logging.warning(f"Unhandled action: {step.action}")
             results.append({"action": step.action, "result": "not_implemented"})
