@@ -42,7 +42,13 @@ from common.memory_helpers import (
 from common.enhanced_memory import (
     get_contextual_intelligence,
     analyze_message_for_proactive_actions,
+)
+from common.contact_intelligence import (
     analyze_contact_context,
+    format_contact_response,
+    create_or_update_contact,
+    get_contact_by_identifier,
+    search_contacts_smart,
 )
 from common.supabase import supabase  # configured client
 
@@ -267,6 +273,15 @@ def process_reply(
     
     # Contact intelligence analysis
     contact_context = analyze_contact_context(last_user_text, chat_id)
+    
+    # Check if we need to provide contact information immediately
+    contact_response = format_contact_response(contact_context)
+    if contact_response and contact_context.get("response_needed"):
+        # Send immediate contact response
+        _teams_post(chat_id, contact_response, access_token)
+        save_message(chat_id, "assistant", contact_response, chat_type)
+        logging.info("✓ contact info sent")
+        return
 
     def _add(dst: List[Dict[str, str]], rows):
         for r in rows:
@@ -313,31 +328,23 @@ def process_reply(
             system_prompt += f"- {alert}\n"
     
     # Add contact intelligence
-    if contact_context.get("mentioned_contacts"):
-        system_prompt += "\n👥 Known Contacts:\n"
-        for contact in contact_context["mentioned_contacts"][:3]:
-            contact_info = f"- {contact['name']}"
-            if contact.get('email'):
-                contact_info += f" ({contact['email']})"
+    if contact_context.get("found_contacts"):
+        system_prompt += "\n👥 Known Contacts (mentioned in message):\n"
+        for contact in contact_context["found_contacts"][:5]:
+            contact_info = f"- {contact['name']} ({contact['email']})"
             if contact.get('role'):
                 contact_info += f" - {contact['role']}"
+            if contact.get('company'):
+                contact_info += f" at {contact['company']}"
             if contact.get('phone'):
-                contact_info += f" - {contact['phone']}"
+                contact_info += f" - Phone: {contact['phone']}"
             system_prompt += contact_info + "\n"
+        system_prompt += "\nIMPORTANT: Include these contact details naturally in your response when relevant.\n"
     
-    # Add contact queries handling
-    if contact_context.get("contact_queries"):
-        system_prompt += "\n📞 Contact Information Requests:\n"
-        for query in contact_context["contact_queries"]:
-            system_prompt += f"- User asking for {query['info_type']} of {query['name']}\n"
-        system_prompt += "IMPORTANT: Provide the requested contact information from the known contacts above. If the contact is not found, say so clearly.\n"
-    
-    # Add conversation history with contacts
-    if contact_context.get("conversation_history"):
-        system_prompt += f"\n💬 Recent conversations with mentioned contacts ({len(contact_context['conversation_history'])} messages)\n"
-        # Add a few recent messages for context
-        for msg in contact_context["conversation_history"][:3]:
-            system_prompt += f"- {msg.get('sender', 'Unknown')}: {msg.get('content', '')[:100]}...\n"
+    # Add missing contacts info
+    if contact_context.get("missing_contacts"):
+        system_prompt += f"\n⚠️ Unknown contacts mentioned: {', '.join(contact_context['missing_contacts'])}\n"
+        system_prompt += "If the user provides their email addresses, add them using the JSON format.\n"
     
     msgs: List[Dict[str, str]] = [
         {"role": "system", "content": system_prompt}
@@ -368,12 +375,16 @@ def process_reply(
     reply = full_reply.split("{")[0].strip()  # clean reply (without json)
 
     if contact_action == "add_contact" and parsed.get("email"):
-        upsert_contact(
+        # Use the new contact intelligence system
+        contact = create_or_update_contact(
             email=parsed["email"],
             name=parsed.get("name"),
             conversation_id=chat_id,
+            role=parsed.get("role"),
+            company=parsed.get("company"),
+            phone=parsed.get("phone")
         )
-        reply += f"\n✅ Contact {parsed.get('name') or parsed['email']} added."
+        reply += f"\n✅ Contact {contact['name']} added."
 
     elif contact_action == "delete_contact" and parsed.get("email"):
         contact = get_contact(email=parsed["email"])
