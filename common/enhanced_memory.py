@@ -240,7 +240,7 @@ def get_contextual_intelligence(
     }
     
     if include_documents:
-        context["documents"] = search_documents_semantic(query, limit=3)
+        context["documents"] = search_documents_semantic_base(query, limit=3)
     
     if include_tasks:
         context["tasks"] = search_tasks_semantic(query, limit=3)

@@ -9,7 +9,20 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- 1. ENHANCED DOCUMENTS TABLE
+-- 1. CONTACT MENTIONS TABLE
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS contact_mentions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    contact_id UUID,  -- You might want to reference the contacts table here
+    chat_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    mention_type TEXT,  -- e.g., 'name', 'email', 'alias'
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- 2. ENHANCED DOCUMENTS TABLE
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -91,12 +104,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_embedding ON tasks USING ivfflat (embedding
 -- 5. SEMANTIC SEARCH FUNCTIONS
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- Document semantic search function
-CREATE OR REPLACE FUNCTION search_documents_semantic(
+-- Document semantic search function (base version)
+CREATE OR REPLACE FUNCTION search_documents_semantic_base(
   query_embedding vector(1536),
   match_count INT DEFAULT 5,
-  similarity_threshold FLOAT DEFAULT 0.7,
-  doc_type_filter TEXT DEFAULT NULL
+  similarity_threshold FLOAT DEFAULT 0.7
 )
 RETURNS TABLE (
   id UUID,
