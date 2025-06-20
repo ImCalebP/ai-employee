@@ -134,6 +134,42 @@ BEGIN
   FROM documents d
   WHERE 
     1 - (d.embedding <=> query_embedding) > similarity_threshold
+  ORDER BY d.embedding <=> query_embedding
+  LIMIT match_count;
+END;
+$$;
+
+-- Document semantic search function
+CREATE OR REPLACE FUNCTION search_documents_semantic(
+  query_embedding vector(1536),
+  match_count INT DEFAULT 5,
+  similarity_threshold FLOAT DEFAULT 0.7,
+  doc_type_filter TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+  id UUID,
+  title TEXT,
+  content TEXT,
+  type TEXT,
+  author TEXT,
+  created_at TIMESTAMPTZ,
+  similarity FLOAT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    d.id,
+    d.title,
+    d.content,
+    d.type,
+    d.author,
+    d.created_at,
+    1 - (d.embedding <=> query_embedding) AS similarity
+  FROM documents d
+  WHERE 
+    1 - (d.embedding <=> query_embedding) > similarity_threshold
     AND (doc_type_filter IS NULL OR d.type = doc_type_filter)
   ORDER BY d.embedding <=> query_embedding
   LIMIT match_count;
