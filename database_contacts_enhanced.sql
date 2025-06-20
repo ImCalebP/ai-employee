@@ -3,6 +3,10 @@
 -- Complete fresh setup - This will DROP and recreate the contacts table
 -- ═══════════════════════════════════════════════════════════════════════════════
 
+-- Drop existing triggers
+DROP TRIGGER IF EXISTS trigger_auto_populate_names ON contacts;
+DROP TRIGGER IF EXISTS update_contacts_updated_at ON contacts;
+
 -- Drop existing contacts table and related objects
 DROP TABLE IF EXISTS contact_mentions CASCADE;
 DROP TABLE IF EXISTS contact_interactions CASCADE;
@@ -11,7 +15,7 @@ DROP TABLE IF EXISTS contacts CASCADE;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- 1. ENHANCED CONTACTS TABLE
--- ═══════════════════════════════════════════════════════════════════════════════
+-- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE contacts (
   id BIGSERIAL PRIMARY KEY,
@@ -84,8 +88,8 @@ CREATE INDEX idx_contacts_aliases ON contacts USING GIN(aliases);
 CREATE INDEX idx_contacts_embedding ON contacts USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- 3. ENHANCED SEARCH FUNCTION
--- ═══════════════════════════════════════════════════════════════════════════════
+-- 3. ENHANCED SEARCH FUNCTION (with scoring)
+-- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE FUNCTION search_contacts_enhanced(
   search_query TEXT,
@@ -206,6 +210,14 @@ FOR EACH ROW
 EXECUTE FUNCTION auto_populate_name_parts();
 
 -- Update timestamp trigger
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
 CREATE TRIGGER update_contacts_updated_at 
 BEFORE UPDATE ON contacts 
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

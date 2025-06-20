@@ -140,9 +140,10 @@ def analyze_intent_advanced(
         "content": """You are an advanced intent analyzer for an AI assistant. Analyze the user's message and return a detailed JSON analysis.
 
 Your response must include:
-1. primary_intent: The main intent (reply, send_email, schedule_meeting, cancel_meeting, generate_document, share_document, create_task, update_task, generate_report, meeting_summary, proactive_followup, alert_human, unknown)
+1. primary_intent: The main intent. Must be one of: reply, send_email, schedule_meeting, cancel_meeting, generate_document, share_document, create_task, update_task, generate_report, meeting_summary, search_contact, search_info, manage_contact, add_contact, update_contact, fetch_contact_info, proactive_followup, alert_human, unknown.
+   **For contact-related queries, use the appropriate contact intent (search_contact, search_info, etc.) as the primary_intent.**
 2. action_sequence: List of actions needed to fulfill the intent, each with:
-   - action: specific action to take. Must be one of: send_email, resolve_contact, reply, generate_document, share_document, fetch_meeting_summary, create_task, update_task, compile_conversation_summary, generate_reply, send_reply, send_message, add_contact, delete_contact, search_contact_role, fetch_contact_info, search_contact_info, search_contact, update_contact, extract_tasks
+   - action: specific action to take. Must be one of: send_email, resolve_contact, reply, generate_document, share_document, fetch_meeting_summary, create_task, update_task, compile_conversation_summary, generate_reply, send_reply, send_message, add_contact, delete_contact, search_contact_role, fetch_contact_info, search_contact, update_contact, extract_tasks
    - params: parameters for the action
    - requires_resolution: list of entities that need to be resolved (e.g., ["contact:Marc", "document:meeting_summary"])
 3. urgency: low, medium, high, or critical
@@ -150,6 +151,8 @@ Your response must include:
 5. missing_info: Dictionary of missing information (e.g., {"recipient": "Need email address for Marc", "subject": "Email subject not specified"})
 6. entities_mentioned: Dictionary mapping entity types to mentions (e.g., {"contacts": ["Marc"], "documents": ["meeting summary"], "meetings": ["today's meeting"]})
 7. confidence: 0.0 to 1.0
+
+IMPORTANT: Never use 'search_contact_info' as a primary_intent. Use 'search_info' instead.
 
 Example for "Send the meeting summary to Marc":
 {
