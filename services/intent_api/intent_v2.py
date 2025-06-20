@@ -39,6 +39,7 @@ from common.enhanced_memory import (
     analyze_message_for_proactive_actions,
     find_relevant_documents_for_message,
 )
+from common.contact_intelligence import create_or_update_contact, get_contact_by_identifier
 from services.intent_api.email_agent import process_email_request
 from services.intent_api.reply_agent import process_reply
 from services.intent_api.document_agent import process_document_request
@@ -63,7 +64,7 @@ class Intent(str, Enum):
     MEETING_SUMMARY = "meeting_summary"
     PROACTIVE_FOLLOWUP = "proactive_followup"
     ALERT_HUMAN = "alert_human"
-    SEARCH_INFO = "search_info"
+    
     UNKNOWN = "unknown"
 
 
@@ -122,9 +123,9 @@ def analyze_intent_advanced(
         "content": """You are an advanced intent analyzer for an AI assistant. Analyze the user's message and return a detailed JSON analysis.
 
 Your response must include:
-1. primary_intent: The main intent (reply, send_email, schedule_meeting, cancel_meeting, generate_document, share_document, create_task, update_task, generate_report, meeting_summary, proactive_followup, alert_human, search_info, unknown)
+1. primary_intent: The main intent (reply, send_email, schedule_meeting, cancel_meeting, generate_document, share_document, create_task, update_task, generate_report, meeting_summary, proactive_followup, alert_human, unknown)
 2. action_sequence: List of actions needed to fulfill the intent, each with:
-   - action: specific action to take. Must be one of: send_email, resolve_contact, reply, generate_document, share_document, fetch_meeting_summary, create_task, extract_tasks, update_task, compile_conversation_summary, generate_reply, send_reply, send_message, add_contact, delete_contact, search_contact_role, fetch_contact_info, search_contact_info, search_contact
+   - action: specific action to take. Must be one of: send_email, resolve_contact, reply, generate_document, share_document, fetch_meeting_summary, create_task, update_task, compile_conversation_summary, generate_reply, send_reply, send_message, add_contact, delete_contact, search_contact_role, fetch_contact_info, search_contact_info, search_contact, update_contact, extract_tasks
    - params: parameters for the action
    - requires_resolution: list of entities that need to be resolved (e.g., ["contact:Marc", "document:meeting_summary"])
 3. urgency: low, medium, high, or critical
@@ -159,7 +160,18 @@ Example for "Send the meeting summary to Marc":
   "confidence": 0.85
 }
 
-IMPORTANT: Always think through the complete action sequence needed. If information is missing, include it in missing_info."""
+Contact Handling Specifics:
+- If a new contact is mentioned (e.g., "Ask John Smith about the report") and you don't have their email or other key details:
+  - Set `missing_info` to ask for these details. For example: `{"missing_contact_email_for_John_Smith": "What is John Smith's email address?", "missing_contact_role_for_John_Smith": "What is John Smith's role (optional)?"}`.
+  - Do NOT create an `add_contact` action yet. Wait for the user to provide the details.
+- If the user provides new information for an *existing* contact (e.g., "Jane Doe's new email is jane.new@example.com" or "Update Mark's role to Lead Engineer"):
+  - Create an `action_sequence` with `action: "update_contact"`.
+  - `params` should include an identifier for the contact (e.g., `{"email": "jane.doe@example.com", "new_email": "jane.new@example.com"}` or `{"name": "Mark", "role": "Lead Engineer"}`).
+- If the user provides details for a *new* contact after you've asked for them:
+  - Create an `action_sequence` with `action: "add_contact"`.
+  - `params` should include all collected details (e.g., `{"name": "Peter Pan", "email": "peter@neverland.com", "role": "Lost Boy"}`).
+
+IMPORTANT: Always think through the complete action sequence needed. If information is missing for a new contact, use `missing_info` to ask for it first. Only generate `add_contact` or `update_contact` actions when you have sufficient information or the user explicitly requests it."""
     }]
     
     # Add chat history
@@ -533,19 +545,63 @@ async def webhook_handler_v2(payload: TeamsWebhookPayload):
             results.append({"action": step.action, "result": "replied"})
         
         elif step.action == "add_contact":
-            # Handle contact creation
-            from services.intent_api.reply_agent import upsert_contact
             try:
-                contact = upsert_contact(
-                    email=step.params.get("email", ""),
-                    name=step.params.get("name"),
-                    conversation_id=chat_id,
-                    phone=step.params.get("phone"),
-                    role=step.params.get("role")
+                email = step.params.get("email")
+                name = step.params.get("name")
+
+                if not email or not name:
+                    results.append({"action": step.action, "result": {"status": "failed", "error": "Missing email or name for add_contact"}})
+                    continue
+
+                kwargs = {
+                    "role": step.params.get("role"),
+                    "phone": step.params.get("phone"),
+                    "company": step.params.get("company"), # Added company
+                    "conversation_id": chat_id
+                }
+                kwargs_filtered = {k: v for k, v in kwargs.items() if v is not None}
+
+                contact = create_or_update_contact(
+                    email=email,
+                    name=name,
+                    **kwargs_filtered
                 )
                 results.append({"action": step.action, "result": {"status": "success", "contact": contact}})
             except Exception as e:
                 logging.error(f"Failed to add contact: {e}")
+                results.append({"action": step.action, "result": {"status": "failed", "error": str(e)}})
+
+        elif step.action == "update_contact":
+            try:
+                identifier = step.params.get("identifier") # Email or name
+                updates = step.params.get("updates")      # Dict of changes
+
+                if not identifier or not updates or not isinstance(updates, dict):
+                    results.append({"action": step.action, "result": {"status": "failed", "error": "Missing identifier or updates for update_contact"}})
+                    continue
+
+                contact_to_update = get_contact_by_identifier(identifier)
+
+                if contact_to_update:
+                    current_email = contact_to_update['email']
+                    # Name for create_or_update_contact: use name from updates, else existing, else "Unknown"
+                    current_name = contact_to_update.get('name')
+                    name_for_call = updates.get('name', current_name if current_name else "Unknown")
+                    
+                    # Ensure name_for_call is not None if current_name was None and not in updates
+                    if name_for_call is None: name_for_call = "Unknown"
+
+
+                    updated_contact = create_or_update_contact(
+                        email=current_email, # Use current email as the key for lookup by create_or_update_contact
+                        name=name_for_call,  # Pass the determined name
+                        **updates            # Pass all updates as kwargs
+                    )
+                    results.append({"action": step.action, "result": {"status": "success", "contact": updated_contact}})
+                else:
+                    results.append({"action": step.action, "result": {"status": "not_found", "identifier": identifier}})
+            except Exception as e:
+                logging.error(f"Error processing update_contact action: {e}")
                 results.append({"action": step.action, "result": {"status": "failed", "error": str(e)}})
         
         elif step.action == "delete_contact":
