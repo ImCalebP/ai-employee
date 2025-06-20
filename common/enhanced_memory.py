@@ -113,7 +113,7 @@ def find_relevant_documents_for_message(
     """Find documents relevant to a message for proactive context."""
     
     # Search for relevant documents
-    relevant_docs = search_documents_semantic(message, limit=limit, similarity_threshold=0.6)
+    relevant_docs = search_documents_semantic_base(message, limit=limit, similarity_threshold=0.6)
     
     # Link message to documents if highly relevant
     for doc in relevant_docs:
