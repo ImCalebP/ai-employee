@@ -219,9 +219,9 @@ def search_tasks_semantic(
     return resp.data or []
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 # Cross-Domain Intelligence
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 
 def get_contextual_intelligence(
     query: str,
@@ -314,9 +314,9 @@ def get_document_context_for_conversation(chat_id: str) -> List[Dict[str, Any]]:
 # and proactive contact information retrieval.
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 # Proactive Intelligence
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
 
 def analyze_message_for_proactive_actions(
     message: str,
@@ -332,14 +332,17 @@ def analyze_message_for_proactive_actions(
         "context_alerts": []
     }
     
-    # Find relevant documents
-    relevant_docs = find_relevant_documents_for_message(message, chat_id)
-    if relevant_docs:
-        actions["document_references"] = relevant_docs
-        actions["context_alerts"].append(
-            f"Found {len(relevant_docs)} relevant document(s) for this discussion"
-        )
-    
+    try:
+        # Find relevant documents
+        relevant_docs = find_relevant_documents_for_message(message, chat_id)
+        if relevant_docs:
+            actions["document_references"] = relevant_docs
+            actions["context_alerts"].append(
+                f"Found {len(relevant_docs)} relevant document(s) for this discussion"
+            )
+    except Exception as e:
+        logging.error(f"Error analyzing message for proactive actions: {e}")
+
     # Check for task-related language
     task_keywords = ["i'll", "i will", "todo", "task", "deadline", "by friday", "tomorrow"]
     if any(keyword in message.lower() for keyword in task_keywords):
