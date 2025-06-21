@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS contact_mentions (
     chat_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
     mention_type TEXT,  -- e.g., 'name', 'email', 'alias'
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    context TEXT       -- Additional context for the mention
 );
 
 -- ═══════════════════════════════════════════════════════════════════════════════
