@@ -113,7 +113,7 @@ def find_relevant_documents_for_message(
     """Find documents relevant to a message for proactive context."""
     
     # Search for relevant documents
-    relevant_docs = search_documents_semantic_base(message, limit=limit, similarity_threshold=0.6)
+    relevant_docs = search_documents_semantic(message, limit=limit, similarity_threshold=0.6)
     
     # Link message to documents if highly relevant
     for doc in relevant_docs:
@@ -240,7 +240,7 @@ def get_contextual_intelligence(
     }
     
     if include_documents:
-        context["documents"] = search_documents_semantic_base(query, limit=3)
+        context["documents"] = search_documents_semantic(query, limit=3)
     
     if include_tasks:
         context["tasks"] = search_tasks_semantic(query, limit=3)
