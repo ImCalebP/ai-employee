@@ -1,8 +1,9 @@
 """
-Enhanced Contact Intelligence System
+Enhanced Contact Intelligence System - Fixed Version
 - Proactive contact recognition and information retrieval
 - Natural language understanding for contact queries
 - Automatic contact enrichment and relationship tracking
+- Robust fallback mechanisms for search
 """
 
 from __future__ import annotations
@@ -18,50 +19,141 @@ client = OpenAI()
 logging.getLogger(__name__).setLevel(logging.INFO)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Core Contact Functions
+# Core Contact Functions with Robust Fallbacks
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def search_contacts_smart(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     """
-    Smart contact search using the enhanced search function in the database.
-    This uses scoring to find the best matches.
+    Smart contact search with multiple fallback strategies.
     """
+    query = query.strip()
+    if not query:
+        return []
+    
+    # Strategy 1: Try the enhanced database function
     try:
-        # Use the database function for smart searching
         resp = supabase.rpc("search_contacts_enhanced", {
             "search_query": query,
             "limit_count": limit
         }).execute()
         
         contacts = resp.data or []
-        
-        # Log for debugging
         if contacts:
-            logging.info(f"Found {len(contacts)} contacts for query '{query}'")
-        else:
-            logging.info(f"No contacts found for query '{query}'")
-            
-        return contacts
+            logging.info(f"Found {len(contacts)} contacts using enhanced search for '{query}'")
+            return contacts
     except Exception as e:
-        logging.error(f"Error searching contacts: {e}")
-        # Fallback to basic search if enhanced function doesn't exist
-        try:
-            from common.unified_memory import search_contacts
-            return search_contacts(query, limit)
-        except Exception as fallback_error:
-            logging.error(f"Fallback search also failed: {fallback_error}")
-            return []
+        logging.debug(f"Enhanced search not available: {e}")
+    
+    # Strategy 2: Direct database search with multiple field matching
+    try:
+        # Build a comprehensive search query
+        search_pattern = f"%{query}%"
+        
+        # Search across multiple fields
+        resp = supabase.table("contacts").select("*").or_(
+            f"name.ilike.{search_pattern},"
+            f"email.ilike.{search_pattern},"
+            f"first_name.ilike.{search_pattern},"
+            f"last_name.ilike.{search_pattern},"
+            f"display_name.ilike.{search_pattern},"
+            f"role.ilike.{search_pattern},"
+            f"company.ilike.{search_pattern}"
+        ).limit(limit).execute()
+        
+        contacts = resp.data or []
+        
+        # Add basic scoring for relevance
+        scored_contacts = []
+        for contact in contacts:
+            score = 0
+            query_lower = query.lower()
+            
+            # Exact matches get highest scores
+            if contact.get('name', '').lower() == query_lower:
+                score = 100
+            elif contact.get('first_name', '').lower() == query_lower:
+                score = 95
+            elif contact.get('last_name', '').lower() == query_lower:
+                score = 95
+            elif contact.get('email', '').lower().startswith(query_lower):
+                score = 90
+            elif query_lower in contact.get('name', '').lower():
+                score = 80
+            elif query_lower in contact.get('email', '').lower():
+                score = 70
+            else:
+                score = 50
+            
+            contact['score'] = score
+            scored_contacts.append(contact)
+        
+        # Sort by score
+        scored_contacts.sort(key=lambda x: x['score'], reverse=True)
+        
+        if scored_contacts:
+            logging.info(f"Found {len(scored_contacts)} contacts using direct search for '{query}'")
+            return scored_contacts[:limit]
+            
+    except Exception as e:
+        logging.error(f"Direct database search failed: {e}")
+    
+    # Strategy 3: Fallback to basic table scan (last resort)
+    try:
+        # Get all contacts and filter in Python
+        resp = supabase.table("contacts").select("*").execute()
+        all_contacts = resp.data or []
+        
+        query_lower = query.lower()
+        matching_contacts = []
+        
+        for contact in all_contacts:
+            # Check if query matches any field
+            if (query_lower in str(contact.get('name', '')).lower() or
+                query_lower in str(contact.get('email', '')).lower() or
+                query_lower in str(contact.get('first_name', '')).lower() or
+                query_lower in str(contact.get('last_name', '')).lower() or
+                query_lower in str(contact.get('display_name', '')).lower() or
+                query_lower in str(contact.get('role', '')).lower() or
+                query_lower in str(contact.get('company', '')).lower()):
+                
+                matching_contacts.append(contact)
+        
+        if matching_contacts:
+            logging.info(f"Found {len(matching_contacts)} contacts using table scan for '{query}'")
+            return matching_contacts[:limit]
+            
+    except Exception as e:
+        logging.error(f"Table scan search failed: {e}")
+    
+    # Strategy 4: Ultimate fallback - try unified memory
+    try:
+        from common.unified_memory import search_contacts
+        contacts = search_contacts(query, limit)
+        if contacts:
+            logging.info(f"Found {len(contacts)} contacts using unified memory for '{query}'")
+            return contacts
+    except Exception as e:
+        logging.error(f"Unified memory search failed: {e}")
+    
+    logging.warning(f"No contacts found for query '{query}' after trying all strategies")
+    return []
 
 
 def get_contact_by_identifier(identifier: str) -> Optional[Dict[str, Any]]:
     """
-    Get a single contact by email, name, or alias.
+    Get a single contact by email, name, or alias with robust search.
     """
+    if not identifier:
+        return None
+    
     # First try exact email match
     if "@" in identifier:
-        resp = supabase.table("contacts").select("*").eq("email", identifier.lower()).limit(1).execute()
-        if resp.data:
-            return resp.data[0]
+        try:
+            resp = supabase.table("contacts").select("*").eq("email", identifier.lower()).limit(1).execute()
+            if resp.data:
+                return resp.data[0]
+        except Exception as e:
+            logging.error(f"Error in email search: {e}")
     
     # Try smart search
     contacts = search_contacts_smart(identifier, limit=1)
@@ -148,6 +240,9 @@ def extract_contact_intent(message: str) -> Dict[str, Any]:
         # Role/position queries
         (r"(?:what(?:'s|s| is)|whats)\s+(\w+)(?:'s|s)?\s+(?:role|position|title)", "role"),
         (r"(?:who is|whos)\s+(\w+)", "general_info"),
+        
+        # Simple name mentions that might be contact queries
+        (r"(?:tell me about|info on|information about)\s+(\w+)", "general_info"),
     ]
     
     # Check each pattern
@@ -167,7 +262,7 @@ def extract_contact_intent(message: str) -> Dict[str, Any]:
     potential_names = re.findall(name_pattern, message)
     
     for name in potential_names:
-        if name not in intent["mentioned_names"] and name not in ["I", "The", "This", "That"]:
+        if name not in intent["mentioned_names"] and name not in ["I", "The", "This", "That", "What", "Who", "Where", "When", "Why", "How"]:
             intent["mentioned_names"].append(name)
             if not intent["has_contact_query"]:
                 intent["confidence"] = 0.5  # Lower confidence for just name mentions
@@ -202,8 +297,8 @@ def analyze_contact_context(message: str, chat_id: str) -> Dict[str, Any]:
             # Add found contacts with their requested information
             for contact in contacts:
                 contact_info = {
-                    "name": contact["name"],
-                    "email": contact["email"],
+                    "name": contact.get("name", "Unknown"),
+                    "email": contact.get("email", "No email"),
                     "match_score": contact.get("score", 0)
                 }
                 
