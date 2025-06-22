@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 
 from pydantic import BaseModel
+from services.intent_api.executor_pool import run_in_shared_executor
 
 logging.getLogger(__name__).setLevel(logging.INFO)
 
@@ -79,32 +80,28 @@ class ParallelExecutor:
     def _wrap_sync_handler(self, handler):
         """Wrap synchronous handler for async execution."""
         async def async_wrapper(params: Dict[str, Any]) -> Dict[str, Any]:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, handler, self.chat_id)
+            return await run_in_shared_executor(handler, self.chat_id)
         return async_wrapper
     
     def _wrap_reply_handler(self, handler):
         """Wrap reply handler with custom parameters."""
         async def async_wrapper(params: Dict[str, Any]) -> Dict[str, Any]:
-            loop = asyncio.get_event_loop()
             text = params.get("text", "")
             custom_prompt = params.get("custom_prompt")
-            await loop.run_in_executor(None, handler, self.chat_id, text, None, custom_prompt)
+            await run_in_shared_executor(handler, self.chat_id, text, None, custom_prompt)
             return {"status": "replied"}
         return async_wrapper
     
     def _wrap_document_handler(self, handler, action_type):
         """Wrap document handler with action type."""
         async def async_wrapper(params: Dict[str, Any]) -> Dict[str, Any]:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, handler, self.chat_id, action_type, params)
+            return await run_in_shared_executor(handler, self.chat_id, action_type, params)
         return async_wrapper
     
     def _wrap_task_handler(self, handler, action_type):
         """Wrap task handler with action type."""
         async def async_wrapper(params: Dict[str, Any]) -> Dict[str, Any]:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, handler, self.chat_id, action_type, params)
+            return await run_in_shared_executor(handler, self.chat_id, action_type, params)
         return async_wrapper
     
     async def _handle_proactive_analysis(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -114,9 +111,7 @@ class ParallelExecutor:
         message = params.get("message", "")
         sender = params.get("sender", "Unknown")
         
-        loop = asyncio.get_event_loop()
-        analysis = await loop.run_in_executor(
-            None, 
+        analysis = await run_in_shared_executor(
             analyze_message_for_proactive_actions, 
             message, 
             self.chat_id, 
@@ -131,9 +126,7 @@ class ParallelExecutor:
         
         query = params.get("query", "")
         
-        loop = asyncio.get_event_loop()
-        context = await loop.run_in_executor(
-            None,
+        context = await run_in_shared_executor(
             get_contextual_intelligence,
             query,
             self.chat_id
@@ -145,9 +138,7 @@ class ParallelExecutor:
         """Handle adding a new contact."""
         from services.intent_api.reply_agent import upsert_contact
         
-        loop = asyncio.get_event_loop()
-        contact = await loop.run_in_executor(
-            None,
+        contact = await run_in_shared_executor(
             upsert_contact,
             email=params.get("email", ""),
             name=params.get("name"),
@@ -162,11 +153,10 @@ class ParallelExecutor:
         """Handle deleting a contact."""
         from services.intent_api.reply_agent import get_contact, delete_contact
         
-        loop = asyncio.get_event_loop()
-        contact = await loop.run_in_executor(None, get_contact, email=params.get("email", ""))
+        contact = await run_in_shared_executor(get_contact, email=params.get("email", ""))
         
         if contact:
-            await loop.run_in_executor(None, delete_contact, contact["id"])
+            await run_in_shared_executor(delete_contact, contact["id"])
             return {"status": "success", "deleted": contact["email"]}
         else:
             return {"status": "not_found"}
@@ -180,8 +170,7 @@ class ParallelExecutor:
         if not role:
             return {"status": "failed", "error": "No role specified"}
         
-        loop = asyncio.get_event_loop()
-        contacts = await loop.run_in_executor(None, search_contacts_by_role, role, 10)
+        contacts = await run_in_shared_executor(search_contacts_by_role, role, 10)
         
         if contacts:
             # Format the response
@@ -193,11 +182,11 @@ class ParallelExecutor:
                 contact_list.append(contact_info)
             
             response_message = f"J'ai trouvé {len(contacts)} contact(s) avec le rôle '{role}':\n\n" + "\n".join(contact_list)
-            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            await run_in_shared_executor(process_reply, self.chat_id, "", None, response_message)
             return {"status": "success", "contacts_found": len(contacts)}
         else:
             response_message = f"Je n'ai trouvé aucun contact avec le rôle '{role}'."
-            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            await run_in_shared_executor(process_reply, self.chat_id, "", None, response_message)
             return {"status": "no_results"}
     
     async def _handle_fetch_contact_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,17 +198,16 @@ class ParallelExecutor:
         name = params.get("name", "")
         email = params.get("email", "")
         
-        loop = asyncio.get_event_loop()
         contacts = []
         
         if email:
-            contact = await loop.run_in_executor(None, get_contact_by_email, email)
+            contact = await run_in_shared_executor(get_contact_by_email, email)
             if contact:
                 contacts = [contact]
         elif role:
-            contacts = await loop.run_in_executor(None, search_contacts_by_role, role, 5)
+            contacts = await run_in_shared_executor(search_contacts_by_role, role, 5)
         elif name:
-            contacts = await loop.run_in_executor(None, search_contacts, name, 5)
+            contacts = await run_in_shared_executor(search_contacts, name, 5)
         
         if contacts:
             # Format the response
@@ -235,12 +223,12 @@ class ParallelExecutor:
                 contact_details.append("\n".join(details))
             
             response_message = f"Voici les informations de contact:\n\n" + "\n\n".join(contact_details)
-            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            await run_in_shared_executor(process_reply, self.chat_id, "", None, response_message)
             return {"status": "success", "contacts_found": len(contacts)}
         else:
             search_criteria = role or name or email
             response_message = f"Je n'ai trouvé aucun contact correspondant à '{search_criteria}'."
-            await loop.run_in_executor(None, process_reply, self.chat_id, "", None, response_message)
+            await run_in_shared_executor(process_reply, self.chat_id, "", None, response_message)
             return {"status": "no_results"}
     
     async def _handle_search_contact_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -254,13 +242,12 @@ class ParallelExecutor:
         name = params.get("name", "")
         email = params.get("email", "")
         
-        loop = asyncio.get_event_loop()
         contact = None
         
         if email:
-            contact = await loop.run_in_executor(None, get_contact_by_email, email)
+            contact = await run_in_shared_executor(get_contact_by_email, email)
         elif name:
-            contacts = await loop.run_in_executor(None, search_contacts, name, 1)
+            contacts = await run_in_shared_executor(search_contacts, name, 1)
             if contacts:
                 contact = contacts[0]
         
