@@ -24,7 +24,7 @@ import openai, os, asyncio, logging, httpx
 # ──────────────────────────────────────────────────────────────
 from common import graph_auth                      # token cache utils
 from common.graph_auth import _save_refresh_token  # refresh-token saver
-from teams_client import post_chat                 # minimal send helper
+from common.teams_client import post_chat                 # minimal send helper
 
 # ──────────────────────────────────────────────────────────────
 # 2.  OpenAI wrapper
