@@ -1,6 +1,7 @@
 """
 services.intent_api.brain
 =========================
+
 FastAPI entry-point for the Teams ↔ OpenAI agent.
 
 Routes
@@ -12,28 +13,28 @@ POST /webhook           Power Automate sends {conversationId, messageId}
                         → fetch message, ask OpenAI, reply in Teams
 """
 
-import os, asyncio, logging, httpx
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
-import openai
 from msal import ConfidentialClientApplication
+import openai, os, asyncio, logging, httpx
 
-# ────────────────────────────────────────────────────────────────────────
-# 1.  External helpers (keep your originals)
-# ────────────────────────────────────────────────────────────────────────
-from common import graph_auth                    # refresh-token cache
-from common.teams_client import post_chat        # minimal send helper
+# ──────────────────────────────────────────────────────────────
+# 1.  Helpers already in your repo
+# ──────────────────────────────────────────────────────────────
+from common import graph_auth                      # token cache utils
+from common.graph_auth import _save_refresh_token  # refresh-token saver
+from teams_client import post_chat                 # minimal send helper
 
-# ────────────────────────────────────────────────────────────────────────
-# 2.  OpenAI tiny wrapper
-# ────────────────────────────────────────────────────────────────────────
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# ──────────────────────────────────────────────────────────────
+# 2.  OpenAI wrapper
+# ──────────────────────────────────────────────────────────────
+openai.api_key = os.getenv("OPENAI_API_KEY") or ""
 if not openai.api_key:
     raise RuntimeError("OPENAI_API_KEY env var missing")
 
-
 async def ask_openai(prompt: str, model: str = "gpt-4o") -> str:
+    """Non-blocking OpenAI call."""
     loop = asyncio.get_event_loop()
     res = await loop.run_in_executor(
         None,
@@ -46,14 +47,14 @@ async def ask_openai(prompt: str, model: str = "gpt-4o") -> str:
     return res["choices"][0]["message"]["content"]
 
 
-# ────────────────────────────────────────────────────────────────────────
-# 3.  FastAPI app / router
-# ────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="AI-Employee • Teams × OpenAI")
+# ──────────────────────────────────────────────────────────────
+# 3.  FastAPI app & router
+# ──────────────────────────────────────────────────────────────
+app    = FastAPI(title="AI-Employee • Teams × OpenAI")
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
 
-# OAuth / Graph config
+# OAuth / Graph settings
 CLIENT_ID     = os.getenv("MS_CLIENT_ID")
 CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 TENANT_ID     = os.getenv("MS_TENANT_ID")
@@ -64,8 +65,7 @@ REDIRECT_URI  = os.getenv(
     "https://ai-employee-28l9.onrender.com/auth/callback",
 )
 
-_flow: dict[str, dict] = {}  # in-memory state → flow
-
+_flow_cache: dict[str, dict] = {}   # state → full flow data
 
 def msal_app() -> ConfidentialClientApplication:
     return ConfidentialClientApplication(
@@ -74,15 +74,14 @@ def msal_app() -> ConfidentialClientApplication:
         authority=AUTHORITY,
     )
 
-
-# ───────────── Auth endpoints ─────────────
+# ─────────── Auth endpoints ───────────
 @router.get("/auth/login")
 def auth_login():
     flow = msal_app().initiate_auth_code_flow(
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
     )
-    _flow[flow["state"]] = flow          # cache
+    _flow_cache[flow["state"]] = flow        # store the entire flow (contains code_verifier)
     return RedirectResponse(flow["auth_uri"])
 
 
@@ -91,27 +90,28 @@ def auth_callback(request: Request):
     code  = request.query_params.get("code")
     state = request.query_params.get("state")
 
-    if not code or not state or state not in _flow:
-        return HTMLResponse("<h3>Invalid or expired login.</h3>", status_code=400)
+    if not code or not state or state not in _flow_cache:
+        return HTMLResponse("<h3>Invalid or expired login session.</h3>", status_code=400)
 
-    flow = _flow.pop(state)
+    flow = _flow_cache.pop(state)            # retrieve saved flow → has code_verifier
     result = msal_app().acquire_token_by_authorization_code(
-        code, scopes=SCOPES, redirect_uri=REDIRECT_URI
+        code,
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI,
+        code_verifier=flow.get("code_verifier"),   # ← PKCE fix
     )
 
     if "refresh_token" in result:
-        # save encrypted RT in Supabase via common.graph_auth
-        graph_auth._save_refresh_token(result["refresh_token"])  # pylint: disable=protected-access
+        _save_refresh_token(result["refresh_token"])
         return HTMLResponse("<h2>✅ Login successful – you can close this tab.</h2>")
 
     return HTMLResponse(f"<pre>{result}</pre>", status_code=400)
 
 
-# ───────────── Teams webhook ─────────────
+# ─────────── Teams webhook ───────────
 class TeamsWebhookPayload(BaseModel):
     messageId:      str
     conversationId: str
-
 
 @router.post("/webhook")
 async def webhook(payload: TeamsWebhookPayload):
@@ -119,13 +119,13 @@ async def webhook(payload: TeamsWebhookPayload):
     msg_id  = payload.messageId
     logging.info("→ webhook chat=%s msg=%s", chat_id, msg_id)
 
-    # 1. Get fresh Graph token
+    # 1️⃣  Graph access-token
     try:
         access_token, _ = graph_auth.get_access_token()
     except RuntimeError as e:
         raise HTTPException(401, f"{e} – visit /auth/login once.") from e
 
-    # 2. Fetch the Teams message
+    # 2️⃣  Fetch original Teams message
     url = f"https://graph.microsoft.com/v1.0/chats/{chat_id}/messages/{msg_id}"
     headers = {"Authorization": f"Bearer {access_token}"}
     async with httpx.AsyncClient(timeout=10) as client:
@@ -135,30 +135,31 @@ async def webhook(payload: TeamsWebhookPayload):
 
     body   = r.json()
     text   = (body.get("body") or {}).get("content", "").strip()
-    sender = (body.get("from") or {}).get("user", {}).get("displayName", "unknown")
+    sender = (body.get("from") or {}).get("user", {}).get("displayName", "_")
 
     if not text or sender.lower().startswith("ai-employee"):
         return {"status": "ignored"}
 
-    # 3. Ask OpenAI
+    # 3️⃣  Ask OpenAI
     reply = await ask_openai(text)
 
-    # 4. Send reply back
+    # 4️⃣  Send reply
     await post_chat(chat_id, reply)
 
     return {"status": "replied", "reply": reply}
 
 
-# ───────────── Health-check ─────────────
+# ─────────── Health-check ───────────
 @router.get("/")
 def root():
     return {"ok": True, "msg": "AI-Employee running"}
 
-
 app.include_router(router)
 
-# ───────────── For `python brain.py` local runs ─────────────
+# ─────────── For local `python brain.py` runs ───────────
 if __name__ == "__main__":
     import uvicorn, sys
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("services.intent_api.brain:app", host="0.0.0.0", port=port, reload="--reload" in sys.argv)
+    uvicorn.run("services.intent_api.brain:app",
+                host="0.0.0.0", port=port,
+                reload="--reload" in sys.argv)
