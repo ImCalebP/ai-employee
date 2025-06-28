@@ -17,34 +17,37 @@ from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
 from msal import ConfidentialClientApplication
-import openai, os, asyncio, logging, httpx
+from openai import OpenAI
+import os, asyncio, logging, httpx
 
 # ──────────────────────────────────────────────────────────────
 # 1.  Helpers in common/
 # ──────────────────────────────────────────────────────────────
 from common import graph_auth
-from common.graph_auth import _save_refresh_token           # store RT
-from common.teams_client import post_chat                   # send message
+from common.graph_auth import _save_refresh_token          # store RT
+from common.teams_client import post_chat                  # send reply to Teams
 
 # ──────────────────────────────────────────────────────────────
-# 2.  OpenAI wrapper
+# 2.  OpenAI client (new ≥1.x SDK)
 # ──────────────────────────────────────────────────────────────
-openai.api_key = os.getenv("OPENAI_API_KEY") or ""
-if not openai.api_key:
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY env var missing")
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 async def ask_openai(prompt: str, model: str = "gpt-4o") -> str:
     loop = asyncio.get_event_loop()
-    res = await loop.run_in_executor(
-        None,
-        lambda: openai.ChatCompletion.create(
+
+    def _call():
+        resp = openai_client.chat.completions.create(
             model=model,
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
-        ),
-    )
-    return res["choices"][0]["message"]["content"]
+        )
+        return resp.choices[0].message.content
 
+    return await loop.run_in_executor(None, _call)
 
 # ──────────────────────────────────────────────────────────────
 # 3.  FastAPI app & router
@@ -53,7 +56,7 @@ app    = FastAPI(title="AI-Employee • Teams × OpenAI")
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
 
-# OAuth / Graph settings ─ adapt in Render ENV
+# OAuth / Graph settings
 CLIENT_ID     = os.getenv("MS_CLIENT_ID")
 CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 TENANT_ID     = os.getenv("MS_TENANT_ID")
@@ -64,7 +67,7 @@ REDIRECT_URI  = os.getenv(
     "https://ai-employee-28l9.onrender.com/auth/callback",
 )
 
-_flow_cache: dict[str, dict] = {}   # state → full MSAL flow
+_flow_cache: dict[str, dict] = {}     # state → full MSAL flow
 
 def msal_app() -> ConfidentialClientApplication:
     return ConfidentialClientApplication(
